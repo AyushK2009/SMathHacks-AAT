@@ -5,6 +5,3 @@ results/
 __pycache__/
 .venv/
 *.pkl
-CLAUDE.md
-.claude/
-.DS_Store
