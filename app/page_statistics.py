@@ -83,6 +83,18 @@ def _cached_correlations(df_hash: str, df: pd.DataFrame, feature_cols: tuple) ->
     return compute_correlations(df, list(feature_cols))
 
 
+@st.cache_data(ttl=3600)
+def _cached_cluster_data(df_hash: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Run DBSCAN and return a clustered copy of df; cached to avoid re-running on every interaction."""
+    from sklearn.cluster import DBSCAN
+
+    coords = df[["latitude", "longitude"]].values
+    cluster_labels = DBSCAN(eps=3.0, min_samples=30).fit_predict(coords)
+    result = df.copy()
+    result["cluster"] = cluster_labels
+    return result
+
+
 def _df_hash(df: pd.DataFrame) -> str:
     """Stable cache key from DataFrame shape and column names."""
     return f"{df.shape}_{df.columns.tolist()}"
@@ -275,12 +287,7 @@ def render() -> None:
             clustered_df = filtered_df
         else:
             with st.spinner("Running DBSCAN clustering..."):
-                from sklearn.cluster import DBSCAN
-
-                coords = filtered_df[["latitude", "longitude"]].values
-                cluster_labels = DBSCAN(eps=3.0, min_samples=30).fit_predict(coords)
-                clustered_df = filtered_df.copy()
-                clustered_df["cluster"] = cluster_labels
+                clustered_df = _cached_cluster_data(_df_hash(filtered_df), filtered_df)
 
         if "cluster" not in clustered_df.columns or clustered_df["cluster"].isna().all():
             st.warning(

@@ -42,6 +42,18 @@ PALETTE: list[str] = [
     "#4C72B0", "#55A868", "#C44E52", "#8172B2", "#CCB974", "#64B5CD",
 ]
 
+# Neutral / semantic colors reused across chart builders
+NEUTRAL_GREY: str = "#999999"    # error bars, weak-correlation annotations
+MUTED_GREY: str = "#888888"      # reference lines, secondary annotation text
+MUTED_FILL: str = "#E8E8E8"      # shaded background regions (e.g. vrect)
+NOISE_COLOR: str = "#CCCCCC"     # DBSCAN noise points
+DARK_TEXT: str = "#1A1A1A"       # map text labels
+
+# Correlation effect-size annotation colors
+CORR_STRONG: str = "#2ca02c"     # green  — |ρ| > 0.3
+CORR_MODERATE: str = "#ff7f0e"   # orange — 0.1 ≤ |ρ| ≤ 0.3
+# CORR_WEAK reuses NEUTRAL_GREY
+
 # Keep the private alias so CHART_THEME.colorway still works
 _COLOR_PALETTE = PALETTE
 
@@ -329,7 +341,7 @@ def build_basin_chart(basin_stats: pd.DataFrame) -> go.Figure:
         x=basins,
         y=basin_stats["mean"],
         error_y=dict(type="data", array=basin_stats["std"].tolist(), visible=True,
-                     color="#999999", thickness=1.5, width=6),
+                     color=NEUTRAL_GREY, thickness=1.5, width=6),
         marker=dict(color=bar_colors, opacity=0.85, line=dict(width=0)),
         customdata=basin_stats[["median", "std", "count"]].values,
         hovertemplate=(
@@ -345,10 +357,10 @@ def build_basin_chart(basin_stats: pd.DataFrame) -> go.Figure:
     # Global mean reference line
     fig.add_hline(
         y=global_mean,
-        line=dict(color="#888888", width=1.5, dash="dash"),
+        line=dict(color=MUTED_GREY, width=1.5, dash="dash"),
         annotation_text="Global Mean",
         annotation_position="top right",
-        annotation_font=dict(size=11, color="#888888", family="Inter"),
+        annotation_font=dict(size=11, color=MUTED_GREY, family="Inter"),
     )
 
     apply_standard_layout(fig, "Mean Microplastic Density by Ocean Basin")
@@ -420,11 +432,11 @@ def build_temporal_chart(temporal_df: pd.DataFrame) -> go.Figure:
     # --- Shaded region: expanded research period (2010 → last year) ---
     fig.add_vrect(
         x0=2010, x1=last_year,
-        fillcolor="#E8E8E8", opacity=0.35,
+        fillcolor=MUTED_FILL, opacity=0.35,
         layer="below", line_width=0,
         annotation_text="Expanded research period",
         annotation_position="top left",
-        annotation_font=dict(size=11, color="#888888", family="Inter"),
+        annotation_font=dict(size=11, color=MUTED_GREY, family="Inter"),
     )
 
     # --- Layout ---
@@ -495,7 +507,7 @@ def build_cluster_map(df: pd.DataFrame, cluster_summary: pd.DataFrame) -> go.Fig
             lon=noise["longitude"],
             mode="markers",
             name="Noise",
-            marker=dict(size=4, color="#CCCCCC", opacity=0.3),
+            marker=dict(size=4, color=NOISE_COLOR, opacity=0.3),
             hovertemplate=(
                 "Lat: %{lat:.3f}, Lon: %{lon:.3f}<br>"
                 "Density: %{customdata:.4f} pieces/m³<br>"
@@ -534,7 +546,7 @@ def build_cluster_map(df: pd.DataFrame, cluster_summary: pd.DataFrame) -> go.Fig
         name="Cluster Centers",
         text=cluster_summary["label"],
         textposition="top right",
-        textfont=dict(size=10, color="#1A1A1A", family="Inter"),
+        textfont=dict(size=10, color=DARK_TEXT, family="Inter"),
         marker=dict(
             size=14,
             color=[id_to_color[cid] for cid in cluster_summary["cluster_id"]],
@@ -555,13 +567,15 @@ def build_cluster_map(df: pd.DataFrame, cluster_summary: pd.DataFrame) -> go.Fig
     # --- Map center and zoom from data extent ---
     center_lat = float(df["latitude"].mean())
     center_lon = float(df["longitude"].mean())
+    lon_range = max(float(df["longitude"].max() - df["longitude"].min()), 1.0)
+    zoom = round(max(0.5, min(5.0, float(np.log2(360.0 / lon_range)) + 1.2)), 1)
 
     apply_standard_layout(fig, "DBSCAN Cluster Map — Microplastic Hotspots")
     fig.update_layout(
         mapbox=dict(
             style="carto-positron",
             center=dict(lat=center_lat, lon=center_lon),
-            zoom=1.2,
+            zoom=zoom,
         ),
         legend=dict(
             x=0.01, y=0.99, xanchor="left", yanchor="top",
@@ -602,6 +616,8 @@ def build_correlation_charts(
         A list of Plotly Figures, one per valid feature, ready for
         ``st.plotly_chart``.
     """
+    validate_dataframe(df, ["measurement"])
+
     # Build lookup from correlations list for quick access
     corr_lookup: dict[str, dict] = {c["feature"]: c for c in correlations}
 
@@ -638,11 +654,11 @@ def build_correlation_charts(
 
         abs_rho = abs(rho)
         if abs_rho > 0.3:
-            annot_color = "#2ca02c"   # green
+            annot_color = CORR_STRONG
         elif abs_rho >= 0.1:
-            annot_color = "#ff7f0e"   # orange
+            annot_color = CORR_MODERATE
         else:
-            annot_color = "#999999"   # grey
+            annot_color = NEUTRAL_GREY
 
         x_label = axis_labels.get(col, col.replace("_", " ").title())
 
