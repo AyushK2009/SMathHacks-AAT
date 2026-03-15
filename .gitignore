@@ -1,5 +1,6 @@
 data/*.csv
 data/*.nc
+data/**/*.nc
 data/*.parquet
 results/
 __pycache__/
