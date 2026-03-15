@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app import styles
 from src.analysis import (
     DEFAULT_HOTSPOT_POLYGONS_FILENAME,
     validate_hotspot_polygons_payload,
@@ -50,25 +51,23 @@ DEFAULT_HOTSPOT_BOUNDARY_CANDIDATES = (
     REPO_ROOT / DEFAULT_HOTSPOT_POLYGONS_FILENAME,
 )
 DENSITY_COLOR_SCALE = (
-    (0.0, "#27d3ff"),
-    (0.25, "#3ba4ff"),
-    (0.5, "#78e08f"),
-    (0.75, "#ffd166"),
-    (1.0, "#ff6b6b"),
+    (0.0, "#2166ac"),
+    (0.25, "#4dac26"),
+    (0.5, "#f0a30a"),
+    (0.75, "#e8601c"),
+    (1.0, "#c0192c"),
 )
-MAP_BACKGROUND_COLOR = "#07131f"
-TEXT_COLOR = "#e6eef8"
-MUTED_TEXT_COLOR = "#91a7c0"
+MAP_BACKGROUND_COLOR = "rgba(0,0,0,0)"
+TEXT_COLOR = "#1a202c"
+MUTED_TEXT_COLOR = "#4a5568"
 FONT_FAMILY = "'IBM Plex Sans', 'Segoe UI', sans-serif"
 EMPTY_MAP_CENTER = {"lat": 15.0, "lon": 0.0}
 EMPTY_MAP_ZOOM = 0.8
 MAP_TILE_SOURCE = [
-    "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+    "https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png"
 ]
-MAP_LABEL_TILE_SOURCE = [
-    "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
-]
-MAP_TILE_ATTRIBUTION = "Source: Esri, HERE, Garmin, FAO, NOAA, USGS"
+MAP_LABEL_TILE_SOURCE: list[str] = []
+MAP_TILE_ATTRIBUTION = "© OpenStreetMap contributors © CARTO"
 DENSITY_TICK_CANDIDATES = (
     0.0,
     0.001,
@@ -236,16 +235,10 @@ def build_sidebar_filters(df: pd.DataFrame) -> ObservationsFilterState:
                 help="Limit observations to a specific range of observation years.",
             )
 
-        show_hotspot_clusters = st.checkbox(
-            "Show hotspot clusters",
-            value=False,
-            help="Overlay precomputed hotspot boundaries on top of the observation map.",
-        )
-
     return ObservationsFilterState(
         selected_oceans=tuple(selected_oceans),
         year_range=selected_year_range,
-        show_hotspot_clusters=show_hotspot_clusters,
+        show_hotspot_clusters=False,  # toggled on main page instead
     )
 
 
@@ -304,8 +297,8 @@ def add_hotspot_boundary_traces(
                 lon=longitudes,
                 mode="lines",
                 fill="toself",
-                fillcolor="rgba(39, 211, 255, 0.16)",
-                line={"color": "rgba(80, 227, 255, 0.90)", "width": 2},
+                fillcolor="rgba(220, 80, 40, 0.12)",
+                line={"color": "rgba(200, 60, 20, 0.85)", "width": 2},
                 hovertemplate=(
                     "<b>Hotspot Cluster %{customdata[0]}</b><br>"
                     "Clustered observations: %{customdata[1]}<extra></extra>"
@@ -323,45 +316,57 @@ def render_summary_section(
 ) -> None:
     """Render the summary metrics above the observations map."""
 
-    st.markdown("### Filtered Summary")
+    st.markdown(styles.section_divider("Filtered Summary"), unsafe_allow_html=True)
     first_column, second_column, third_column = st.columns(3)
 
-    _render_summary_card(
-        first_column,
-        title="Filtered observations",
-        value=f"{len(filtered_df):,}",
-        subtitle="Mapped NOAA microplastics records",
+    first_column.markdown(
+        styles.metric_card(
+            title="Filtered observations",
+            value=f"{len(filtered_df):,}",
+            subtitle="Mapped NOAA microplastics records",
+            icon="📍",
+            ticker_id="obs-count",
+            ticker_value=len(filtered_df),
+        ),
+        unsafe_allow_html=True,
     )
-    _render_summary_card(
-        second_column,
-        title="Year range",
-        value=_format_year_range(filter_state.year_range),
-        subtitle="Observation window currently displayed",
+    second_column.markdown(
+        styles.metric_card(
+            title="Year range",
+            value=_format_year_range(filter_state.year_range),
+            subtitle="Observation window currently displayed",
+            icon="📅",
+        ),
+        unsafe_allow_html=True,
     )
-    _render_summary_card(
-        third_column,
-        title="Ocean basins",
-        value=_format_selected_basins(filter_state.selected_oceans),
-        subtitle="Major basins included in the current view",
+    third_column.markdown(
+        styles.metric_card(
+            title="Ocean basins",
+            value=_format_selected_basins(filter_state.selected_oceans),
+            subtitle="Major basins included in the current view",
+            icon="🌊",
+        ),
+        unsafe_allow_html=True,
     )
 
 
 def render_page_header() -> None:
     """Render the title and intro copy for the observations page."""
 
-    st.title(PAGE_TITLE)
-    st.caption("NOAA marine microplastics observations")
-    st.write(
-        "Each point represents a NOAA microplastics observation colored by measured "
-        "density, making it easier to compare where concentrations appear strongest "
-        "across the global ocean."
+    st.markdown(
+        styles.page_header(
+            PAGE_TITLE,
+            "Each point represents a NOAA observation colored by measured density — "
+            "compare where concentrations appear strongest across the global ocean.",
+        ),
+        unsafe_allow_html=True,
     )
 
 
 def render_map_section(figure: go.Figure) -> None:
     """Render the observations map section."""
 
-    st.markdown("### Observations Map")
+    st.markdown(styles.section_divider("Observations Map"), unsafe_allow_html=True)
     st.plotly_chart(
         figure,
         use_container_width=True,
@@ -372,7 +377,6 @@ def render_map_section(figure: go.Figure) -> None:
 def render_page() -> None:
     """Render the full observations dashboard page."""
 
-    _inject_page_styles()
     render_page_header()
 
     try:
@@ -387,18 +391,29 @@ def render_page() -> None:
     filter_state = build_sidebar_filters(prepared_observations)
     filtered_observations = apply_filters(prepared_observations, filter_state)
 
+    show_hotspot_clusters = st.toggle(
+        "Show hotspot cluster overlay",
+        value=False,
+        help="Overlay precomputed DBSCAN hotspot boundaries on the map.",
+    )
+
     hotspot_polygons, hotspot_message = _load_optional_hotspot_polygons(
-        filter_state.show_hotspot_clusters
+        show_hotspot_clusters
     )
     if hotspot_message:
-        st.info(hotspot_message)
+        st.markdown(styles.callout(hotspot_message, kind="info", icon="ℹ️"), unsafe_allow_html=True)
 
     render_summary_section(filtered_observations, filter_state)
 
     if filtered_observations.empty:
-        st.info(
-            "No observations match the current filters. Adjust the year range or select "
-            "additional ocean basins to repopulate the map."
+        st.markdown(
+            styles.callout(
+                "No observations match the current filters. Adjust the year range or select "
+                "additional ocean basins to repopulate the map.",
+                kind="info",
+                icon="ℹ️",
+            ),
+            unsafe_allow_html=True,
         )
 
     figure = build_figure(filtered_observations, hotspot_polygons=hotspot_polygons)
@@ -650,14 +665,16 @@ def _add_observation_trace(figure: go.Figure, display_df: pd.DataFrame) -> None:
                         "text": (
                             "Measured Density"
                             "<br><sup>pieces/m3, log scale, capped at 90th percentile</sup>"
-                        )
+                        ),
+                        "font": {"color": "#1a202c"},
                     },
                     "tickvals": density_scale["tickvals"],
                     "ticktext": density_scale["ticktext"],
+                    "tickfont": {"color": "#1a202c"},
                     "thickness": 16,
                     "len": 0.78,
-                    "bgcolor": "rgba(7, 19, 31, 0.65)",
-                    "outlinecolor": "rgba(145, 167, 192, 0.40)",
+                    "bgcolor": "rgba(255, 255, 255, 0.80)",
+                    "outlinecolor": "rgba(100, 130, 160, 0.50)",
                 },
             },
             hovertemplate=(
@@ -698,7 +715,7 @@ def _build_empty_state_figure(message: str) -> go.Figure:
                 "x": 0.5,
                 "y": 0.5,
                 "showarrow": False,
-                "font": {"size": 16, "color": TEXT_COLOR},
+                "font": {"size": 16, "color": "#1a202c"},
                 "align": "center",
             }
         ],
@@ -715,23 +732,9 @@ def _build_map_layout(
 
     return {
         "mapbox": {
-            "style": "white-bg",
+            "style": "carto-positron",
             "center": center,
             "zoom": zoom,
-            "layers": [
-                {
-                    "below": "traces",
-                    "sourcetype": "raster",
-                    "sourceattribution": MAP_TILE_ATTRIBUTION,
-                    "source": MAP_TILE_SOURCE,
-                },
-                {
-                    "below": "traces",
-                    "sourcetype": "raster",
-                    "sourceattribution": MAP_TILE_ATTRIBUTION,
-                    "source": MAP_LABEL_TILE_SOURCE,
-                }
-            ],
         },
         "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
         "height": 720,
@@ -739,9 +742,9 @@ def _build_map_layout(
         "plot_bgcolor": MAP_BACKGROUND_COLOR,
         "font": {"color": TEXT_COLOR, "family": FONT_FAMILY},
         "hoverlabel": {
-            "bgcolor": "rgba(7, 19, 31, 0.96)",
-            "bordercolor": "rgba(145, 167, 192, 0.55)",
-            "font": {"color": TEXT_COLOR, "size": 12},
+            "bgcolor": "rgba(255, 255, 255, 0.95)",
+            "bordercolor": "rgba(100, 130, 160, 0.55)",
+            "font": {"color": "#1a202c", "size": 12},
             "align": "left",
         },
     }
@@ -783,39 +786,6 @@ def _estimate_map_zoom(df: pd.DataFrame) -> float:
         return 4.1
     return 5.2
 
-
-def _render_summary_card(
-    column: Any,
-    *,
-    title: str,
-    value: str,
-    subtitle: str,
-) -> None:
-    """Render one summary card using a dark dashboard style."""
-
-    column.markdown(
-        f"""
-        <div style="
-            background: linear-gradient(160deg, rgba(13, 27, 42, 0.95), rgba(7, 19, 31, 0.98));
-            border: 1px solid rgba(120, 224, 143, 0.18);
-            border-radius: 16px;
-            padding: 1rem 1.1rem;
-            min-height: 130px;
-            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.20);
-        ">
-            <div style="color: {MUTED_TEXT_COLOR}; font-size: 0.9rem; margin-bottom: 0.35rem;">
-                {title}
-            </div>
-            <div style="color: {TEXT_COLOR}; font-size: 1.9rem; font-weight: 700; line-height: 1.1;">
-                {value}
-            </div>
-            <div style="color: {MUTED_TEXT_COLOR}; font-size: 0.88rem; margin-top: 0.55rem;">
-                {subtitle}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def _build_density_color_scale(density_series: pd.Series) -> dict[str, Any]:
@@ -893,31 +863,6 @@ def _format_selected_basins(selected_oceans: Sequence[str]) -> str:
         return "All major basins"
     return ", ".join(selected_oceans)
 
-
-def _inject_page_styles() -> None:
-    """Apply lightweight dashboard styling for the observations page."""
-
-    st.markdown(
-        """
-        <style>
-        section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #08121d 0%, #0d1b2a 100%);
-        }
-        div[data-testid="stSidebarUserContent"] h1,
-        div[data-testid="stSidebarUserContent"] h2,
-        div[data-testid="stSidebarUserContent"] label,
-        div[data-testid="stSidebarUserContent"] p,
-        div[data-testid="stSidebarUserContent"] span {
-            color: #e6eef8;
-        }
-        div.block-container {
-            padding-top: 2rem;
-            padding-bottom: 2.25rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 if __name__ == "__main__":

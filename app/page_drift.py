@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app import styles
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _TRAJECTORIES_PATH = REPO_ROOT / "results" / "all_trajectories.parquet"
 _NOAA_CSV_PATH = REPO_ROOT / "data" / "NOAA.csv"
@@ -24,40 +26,40 @@ _STREAMLINES_PATH = REPO_ROOT / "results" / "streamlines.npz"
 # Visual constants
 # ---------------------------------------------------------------------------
 
-# Density heatmap: transparent → warm amber → hot red (more vivid)
+# Density heatmap: transparent → warm amber → hot red (vivid on light basemap)
 _DRIFT_COLORSCALE = [
-    [0.00, "rgba(0, 0, 0, 0)"],
-    [0.05, "rgba(20, 20, 80, 0.3)"],
-    [0.15, "rgba(255, 220, 50, 0.45)"],
-    [0.35, "rgba(255, 140, 20, 0.65)"],
-    [0.55, "rgba(255, 60, 10, 0.8)"],
-    [0.80, "rgba(200, 20, 20, 0.9)"],
-    [1.00, "rgba(140, 0, 40, 0.95)"],
+    [0.00, "rgba(255, 255, 255, 0)"],
+    [0.05, "rgba(255, 230, 100, 0.35)"],
+    [0.15, "rgba(255, 180, 30, 0.55)"],
+    [0.35, "rgba(255, 100, 10, 0.72)"],
+    [0.55, "rgba(220, 40, 10, 0.85)"],
+    [0.80, "rgba(180, 10, 10, 0.92)"],
+    [1.00, "rgba(120, 0, 30, 0.97)"],
 ]
 
 # NOAA observation density overlay — blue/purple tones to contrast with drift heatmap
 _NOAA_COLORSCALE = [
-    [0.0, "rgba(0, 0, 0, 0)"],
-    [0.2, "rgba(100, 140, 255, 0.25)"],
-    [0.5, "rgba(130, 100, 255, 0.4)"],
-    [0.8, "rgba(180, 80, 255, 0.55)"],
-    [1.0, "rgba(220, 60, 255, 0.7)"],
+    [0.0, "rgba(255, 255, 255, 0)"],
+    [0.2, "rgba(60, 100, 220, 0.20)"],
+    [0.5, "rgba(80, 60, 200, 0.35)"],
+    [0.8, "rgba(130, 40, 200, 0.50)"],
+    [1.0, "rgba(180, 20, 210, 0.65)"],
 ]
 
-# Streamline speed palette — bolder than before so currents are clearly visible
+# Streamline speed palette — darker, saturated for visibility on light basemap
 _N_SPEED_BINS = 6
 _STREAM_PALETTE = [
-    "rgba(30, 80, 160, 0.50)",   # deep blue (slowest)
-    "rgba(50, 120, 190, 0.55)",  # medium blue
-    "rgba(70, 160, 210, 0.58)",  # sky blue
-    "rgba(50, 170, 120, 0.55)",  # teal-green
-    "rgba(200, 190, 50, 0.55)",  # yellow
-    "rgba(210, 100, 50, 0.60)",  # orange (fastest)
+    "rgba(10, 60, 140, 0.60)",   # deep navy (slowest)
+    "rgba(20, 100, 180, 0.65)",  # medium blue
+    "rgba(10, 140, 190, 0.65)",  # cerulean
+    "rgba(10, 140, 100, 0.60)",  # teal
+    "rgba(180, 140, 10, 0.65)",  # amber
+    "rgba(190, 60, 20, 0.70)",   # red-orange (fastest)
 ]
 
-# Trail / particle colors
-_TRAIL_COLOR = "rgba(0, 255, 200, 0.25)"
-_PARTICLE_COLOR = "#00ffd0"
+# Trail / particle colors — visible on light map
+_TRAIL_COLOR = "rgba(0, 70, 180, 0.40)"
+_PARTICLE_COLOR = "#cc2200"
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +297,10 @@ def _build_figure(
                 colorbar=dict(
                     title=dict(
                         text="Plastic Accumulation",
-                        font=dict(color="white", size=12),
+                        font=dict(color="#1a202c", size=12),
                     ),
-                    tickfont=dict(color="white"),
+                    tickfont=dict(color="#1a202c"),
+                    bgcolor="rgba(255,255,255,0.80)",
                     x=0.99,
                     len=0.5,
                 ),
@@ -347,15 +350,7 @@ def _build_figure(
 
     fig.update_layout(
         mapbox=dict(
-            style="white-bg",
-            layers=[{
-                "below": "traces",
-                "sourcetype": "raster",
-                "sourceattribution": "CARTO",
-                "source": [
-                    "https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}@2x.png"
-                ],
-            }],
+            style="carto-positron",
             center=dict(lat=15, lon=0),
             zoom=1.3,
         ),
@@ -376,9 +371,12 @@ def render() -> None:
     """Render the Particle Drift page with flicker-free animated playback."""
 
     st.markdown(
-        "We simulate releasing microplastic particles from each of **18 major "
-        "coastal cities** and track where ocean currents carry them over **5 years**. "
-        "Press **Play** to watch plastics spread and accumulate in ocean gyres."
+        styles.page_header(
+            "Particle Drift Simulation",
+            "18 coastal cities · 5-year Lagrangian drift · OSCAR current forcing — "
+            "press Play to watch plastics accumulate in ocean gyres.",
+        ),
+        unsafe_allow_html=True,
     )
 
     # -- Load data --
@@ -396,7 +394,11 @@ def render() -> None:
     all_days = sorted(df["day"].unique())
 
     # -- Sidebar controls --
-    st.sidebar.markdown("### Drift Settings")
+    st.sidebar.markdown(
+        '<p class="pf-gradient-title" style="font-size:1rem;margin:0.5rem 0 0.75rem;">'
+        "Drift Settings</p>",
+        unsafe_allow_html=True,
+    )
 
     selected_cities = st.sidebar.multiselect(
         "Source Cities",
@@ -484,6 +486,7 @@ def render() -> None:
     )
 
     # -- Playback controls --
+    st.markdown('<div class="pf-media-marker"></div>', unsafe_allow_html=True)
     btn_cols = st.columns([1, 1, 1, 4])
     with btn_cols[0]:
         if st.button("Play", use_container_width=True):
@@ -507,10 +510,37 @@ def render() -> None:
 
     # -- Metrics row --
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Time", _day_label(day))
-    c2.metric("Day", f"{day:,} / {all_days[-1]:,}")
-    c3.metric("Active Particles", f"{n_particles:,}")
-    c4.metric("Source Cities", n_cities)
+    c1.markdown(
+        styles.metric_card("Time", _day_label(day), icon="🕐"),
+        unsafe_allow_html=True,
+    )
+    c2.markdown(
+        styles.metric_card(
+            "Day",
+            f"{day:,}",
+            subtitle=f"of {all_days[-1]:,}",
+            icon="📅",
+            ticker_id=f"drift-day-{idx}",
+            ticker_value=day,
+        ),
+        unsafe_allow_html=True,
+    )
+    c3.markdown(
+        styles.metric_card(
+            "Active Particles",
+            f"{n_particles:,}",
+            icon="🌀",
+            ticker_id=f"drift-pts-{idx}",
+            ticker_value=n_particles,
+        ),
+        unsafe_allow_html=True,
+    )
+    c4.markdown(
+        styles.metric_card("Source Cities", str(n_cities), icon="🏙️"),
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(styles.section_divider("Drift Simulation"), unsafe_allow_html=True)
 
     # -- Build and display map (single call, stable DOM position = no flicker) --
     trail = trail_frames.get(day)

@@ -9,56 +9,89 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from app import styles
+
 APP_TITLE = "PlasticFlow"
-PAGE_OPTIONS = (
-    "Global Observations Map",
-    "Ocean Currents",
-    "Particle Drift",
-    "Statistical Insights",
-)
+
+_NAV_PAGES = ["home", "observations", "currents", "drift", "stats"]
+_NAV_LABELS = {
+    "home": "🌊  PlasticFlow",
+    "observations": "Observations",
+    "currents": "Currents",
+    "drift": "Drift",
+    "stats": "Insights",
+}
 
 
-def render_navigation() -> str:
-    """Render the main app navigation and return the selected page label."""
+def _sync_page_from_query_params() -> None:
+    """Read ?page= from the URL and update session state."""
+    params = st.query_params
+    if "page" in params:
+        requested = params["page"]
+        if requested in _NAV_PAGES and requested != st.session_state.get("page"):
+            st.session_state.page = requested
+        st.query_params.clear()
 
-    return st.sidebar.radio("Navigate", PAGE_OPTIONS)
+
+def render_top_nav() -> None:
+    """Render a single cohesive HTML nav bar."""
+
+    current = st.session_state.get("page", "home")
+
+    links_html = ""
+    for page in _NAV_PAGES:
+        label = _NAV_LABELS[page]
+        active_class = "pf-nav-active" if page == current else ""
+        css_class = f"pf-nav-logo {active_class}" if page == "home" else f"pf-nav-link {active_class}"
+        links_html += (
+            f'<a class="{css_class.strip()}" href="?page={page}">{label}</a>'
+        )
+
+    st.markdown(
+        f"""
+<nav class="pf-navbar">
+  {links_html}
+</nav>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def render_selected_page(selected_page: str) -> None:
-    """Render the page selected in the app sidebar."""
+def render_selected_page(page: str) -> None:
+    """Render the currently active page."""
 
-    if selected_page == "Ocean Currents":
+    if page == "observations":
+        from app import page_observations
+        page_observations.render()
+    elif page == "currents":
         from app import page_currents
-
         page_currents.render()
-        return
-
-    if selected_page == "Particle Drift":
+    elif page == "drift":
         from app import page_drift
-
         page_drift.render()
-        return
-
-    if selected_page == "Statistical Insights":
+    elif page == "stats":
         from app import page_statistics
-
         page_statistics.render()
-        return
-
-    from app import page_observations
-
-    page_observations.render()
+    else:
+        from app import page_landing
+        page_landing.render()
 
 
 def render_footer() -> None:
     """Render shared sidebar footer content."""
 
-    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        '<hr style="border:none;border-top:1px solid rgba(39,211,255,0.10);margin:0.5rem 0;">',
+        unsafe_allow_html=True,
+    )
     st.sidebar.caption("Data: NOAA NCEI Marine Microplastics & NASA OSCAR Surface Currents")
 
 
 def main() -> None:
     """Render the PlasticFlow Streamlit app."""
+
+    if "page" not in st.session_state:
+        st.session_state.page = "home"
 
     try:
         st.set_page_config(
@@ -69,8 +102,10 @@ def main() -> None:
     except st.errors.StreamlitAPIException:
         pass
 
-    selected_page = render_navigation()
-    render_selected_page(selected_page)
+    _sync_page_from_query_params()
+    styles.inject_global_styles()
+    render_top_nav()
+    render_selected_page(st.session_state.page)
     render_footer()
 
 

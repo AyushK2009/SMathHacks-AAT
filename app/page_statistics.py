@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import pandas as pd
 import streamlit as st
 
+from app import styles
+
 from src.analysis import (
     build_basin_chart,
     build_cluster_map,
@@ -110,23 +112,6 @@ def render() -> None:
     """Render the Statistical Insights page."""
     global filtered_df
 
-    st.markdown(
-        """
-        <style>
-        #MainMenu { visibility: hidden; }
-        footer { visibility: hidden; }
-        header { visibility: hidden; }
-        html, body, [class*="css"] {
-            font-family: "Inter", "Arial", sans-serif;
-        }
-        div[data-testid="stTabContent"] {
-            padding-bottom: 2rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
     try:
         df = _load_data()
     except FileNotFoundError:
@@ -140,17 +125,12 @@ def render() -> None:
     # ------------------------------------------------------------------ #
     # Header
     # ------------------------------------------------------------------ #
-    st.title("Statistical Insights")
     st.markdown(
-        """
-        This page explores the NOAA NCEI Marine Microplastics dataset through four
-        complementary lenses: how concentration varies across **ocean basins**, how
-        **sampling activity and measured density have changed over time**, where
-        geographic **hotspot clusters** emerge using DBSCAN, and what **correlations**
-        exist between density and spatial or temporal features.  Use the sidebar
-        filters to narrow the analysis to specific basins or time windows — all charts
-        update together.
-        """
+        styles.page_header(
+            "Statistical Insights",
+            "Ocean basins · temporal trends · DBSCAN hotspots · Spearman correlations",
+        ),
+        unsafe_allow_html=True,
     )
 
     # ------------------------------------------------------------------ #
@@ -219,13 +199,17 @@ def render() -> None:
             best_mean   = float(basin_stats.loc[best_basin,  "mean"])
             ratio       = worst_mean / best_mean if best_mean > 0 else float("nan")
 
-            st.info(
-                f"**Key finding:** The **{worst_basin}** has the highest mean microplastic "
-                f"density at {_fmt_density(worst_mean)} — approximately **{ratio:.0f}×** higher "
-                f"than the {best_basin} ({_fmt_density(best_mean)}). Values are shown on "
-                f"a log scale because density spans several orders of magnitude across basins."
+            st.markdown(
+                styles.callout(
+                    f"<b>Key finding:</b> The <b>{worst_basin}</b> has the highest mean "
+                    f"microplastic density at {_fmt_density(worst_mean)} — approximately "
+                    f"<b>{ratio:.0f}×</b> higher than the {best_basin} "
+                    f"({_fmt_density(best_mean)}). Values are shown on a log scale.",
+                    kind="info",
+                    icon="🔑",
+                ),
+                unsafe_allow_html=True,
             )
-            st.divider()
 
             # ── FIX 4: Chart + basin snapshot panel side by side ────────
             fig = build_basin_chart(basin_stats)
@@ -243,11 +227,14 @@ def render() -> None:
                     basin_mean = float(row["mean"])
                     n_nonzero  = int(row["n_nonzero"]) if "n_nonzero" in row.index else int(row["count"])
                     total      = int(row["count"])
-                    st.metric(
-                        label=f"#{rank} {basin}",
-                        value=_fmt_density(basin_mean),
-                        delta=f"{n_nonzero:,} detections / {total:,} total",
-                        delta_color="off",
+                    col_snapshot.markdown(
+                        styles.metric_card(
+                            title=f"#{rank} {basin}",
+                            value=_fmt_density(basin_mean),
+                            subtitle=f"{n_nonzero:,} detections / {total:,} total",
+                            icon="🌊" if rank == 1 else "💧",
+                        ),
+                        unsafe_allow_html=True,
                     )
 
                 st.caption(
@@ -273,13 +260,16 @@ def render() -> None:
 
     # ---- Tab 2: Temporal Trends -------------------------------------- #
     with tab2:
-        st.warning(
-            "⚠️ Interpretation note: The bar height shows how many samples were collected "
-            "each year — not how much plastic exists. A spike in sample count reflects "
-            "increased research activity. Compare the orange line (measured density) "
-            "independently of the bars to assess real concentration trends."
+        st.markdown(
+            styles.callout(
+                "The bar height shows how many samples were collected each year — not how "
+                "much plastic exists. A spike in sample count reflects increased research "
+                "activity. Compare the orange line (measured density) independently.",
+                kind="warn",
+                icon="⚠️",
+            ),
+            unsafe_allow_html=True,
         )
-        st.divider()
 
         with st.spinner("Crunching temporal trends..."):
             temporal_df = _cached_temporal_trends(_df_hash(filtered_df), filtered_df)
@@ -309,28 +299,38 @@ def render() -> None:
         density_delta = _prev_year_delta("mean_density", peak_density_year)
 
         col_left, col_right = st.columns(2)
-        with col_left:
-            st.metric(
-                label="Peak Research Year",
-                value=str(peak_research_year),
-                delta=f"{int(obs_delta):+,} obs vs prior year" if obs_delta is not None else None,
-            )
-        with col_right:
-            st.metric(
-                label="Highest Mean Density Year",
-                value=str(peak_density_year),
-                delta=f"{density_delta:+.4f} pieces/m³ vs prior year" if density_delta is not None else None,
-            )
+        col_left.markdown(
+            styles.metric_card(
+                "Peak Research Year",
+                str(peak_research_year),
+                subtitle=f"{int(obs_delta):+,} obs vs prior year" if obs_delta is not None else "",
+                icon="🔬",
+            ),
+            unsafe_allow_html=True,
+        )
+        col_right.markdown(
+            styles.metric_card(
+                "Highest Mean Density Year",
+                str(peak_density_year),
+                subtitle=f"{density_delta:+.4f} pieces/m³ vs prior year" if density_delta is not None else "",
+                icon="📈",
+            ),
+            unsafe_allow_html=True,
+        )
 
     # ---- Tab 3: Hotspot Clusters ------------------------------------- #
     with tab3:
-        st.info(
-            "Clusters were identified using DBSCAN spatial clustering. Each numbered "
-            "cluster corresponds to a region of elevated microplastic concentration. "
-            "Grey points are ungrouped observations. The five major ocean gyres — "
-            "natural circular current systems — are known accumulation zones."
+        st.markdown(
+            styles.callout(
+                "Clusters were identified using DBSCAN spatial clustering. Each numbered "
+                "cluster corresponds to a region of elevated microplastic concentration. "
+                "Grey points are ungrouped observations. The five major ocean gyres — "
+                "natural circular current systems — are known accumulation zones.",
+                kind="info",
+                icon="🗺️",
+            ),
+            unsafe_allow_html=True,
         )
-        st.divider()
 
         if "cluster" in filtered_df.columns:
             clustered_df = filtered_df
@@ -395,22 +395,34 @@ def render() -> None:
             pct_clustered = 100 * n_clustered / n_total if n_total > 0 else 0.0
 
             m1, m2, m3 = st.columns(3)
-            with m1:
-                st.metric("Clustered Observations", f"{n_clustered:,}")
-            with m2:
-                st.metric("Noise (Ungrouped)", f"{n_noise:,}")
-            with m3:
-                st.metric("% Data Clustered", f"{pct_clustered:.1f}%")
+            m1.markdown(
+                styles.metric_card("Clustered Observations", f"{n_clustered:,}", icon="🟢",
+                                   ticker_id="stat-clustered", ticker_value=n_clustered),
+                unsafe_allow_html=True,
+            )
+            m2.markdown(
+                styles.metric_card("Noise (Ungrouped)", f"{n_noise:,}", icon="⚫",
+                                   ticker_id="stat-noise", ticker_value=n_noise),
+                unsafe_allow_html=True,
+            )
+            m3.markdown(
+                styles.metric_card("% Data Clustered", f"{pct_clustered:.1f}%", icon="📊"),
+                unsafe_allow_html=True,
+            )
 
     # ---- Tab 4: Correlations ----------------------------------------- #
     with tab4:
-        st.info(
-            "Spearman rank correlation measures the monotonic relationship between each "
-            "feature and microplastic density. ρ near ±1 indicates strong correlation; "
-            "near 0 indicates no relationship. P-values below 0.05 suggest the correlation "
-            "is statistically significant."
+        st.markdown(
+            styles.callout(
+                "Spearman rank correlation measures the monotonic relationship between each "
+                "feature and microplastic density. ρ near ±1 indicates strong correlation; "
+                "near 0 indicates no relationship. P-values below 0.05 suggest the "
+                "correlation is statistically significant.",
+                kind="info",
+                icon="📈",
+            ),
+            unsafe_allow_html=True,
         )
-        st.divider()
 
         with st.spinner("Computing correlations..."):
             feature_cols = [c for c in _FEATURE_COLS if c in filtered_df.columns]

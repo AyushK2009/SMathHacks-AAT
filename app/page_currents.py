@@ -8,6 +8,8 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
+from app import styles
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _STREAMLINES_PATH = REPO_ROOT / "results" / "streamlines.npz"
 
@@ -132,7 +134,7 @@ def _build_figure(
         lons = np.array(new_lons)
         speeds = np.array(new_speeds)
 
-    # Layer 1: Ocean speed heatmap — gives the ocean a blue tint distinct from land
+    # Layer 1: Ocean speed heatmap — subtle tint on Voyager light basemap
     lon_grid, lat_grid = np.meshgrid(grid_lon, grid_lat)
     flat_speed = grid_speed.ravel()
     ocean_mask = flat_speed > 0.001
@@ -143,15 +145,15 @@ def _build_figure(
             z=flat_speed[ocean_mask].tolist(),
             radius=18,
             colorscale=[
-                [0.0, "rgba(8, 30, 60, 0.4)"],
-                [0.3, "rgba(10, 50, 100, 0.5)"],
-                [0.6, "rgba(20, 80, 140, 0.45)"],
-                [0.8, "rgba(40, 120, 180, 0.35)"],
-                [1.0, "rgba(60, 160, 200, 0.3)"],
+                [0.0, "rgba(0, 80, 160, 0.0)"],
+                [0.3, "rgba(0, 100, 190, 0.18)"],
+                [0.6, "rgba(0, 130, 210, 0.25)"],
+                [0.8, "rgba(0, 160, 220, 0.22)"],
+                [1.0, "rgba(20, 180, 230, 0.18)"],
             ],
             zmin=0,
             zmax=float(np.percentile(flat_speed[ocean_mask], 95)),
-            opacity=0.7,
+            opacity=0.8,
             showscale=False,
             hoverinfo="skip",
         ))
@@ -189,8 +191,9 @@ def _build_figure(
             cmax=float(speeds.max()),
             showscale=True,
             colorbar=dict(
-                title=dict(text="Current Speed (m/s)", font=dict(color="white")),
-                tickfont=dict(color="white"),
+                title=dict(text="Current Speed (m/s)", font=dict(color="#1a202c")),
+                tickfont=dict(color="#1a202c"),
+                bgcolor="rgba(255,255,255,0.80)",
                 x=0.99,
                 len=0.6,
             ),
@@ -201,15 +204,7 @@ def _build_figure(
 
     fig.update_layout(
         mapbox=dict(
-            style="white-bg",
-            layers=[{
-                "below": "traces",
-                "sourcetype": "raster",
-                "sourceattribution": "CARTO",
-                "source": [
-                    "https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}@2x.png"
-                ],
-            }],
+            style="carto-positron",
             center=dict(lat=10, lon=0),
             zoom=1.3,
         ),
@@ -224,17 +219,22 @@ def _build_figure(
 def render() -> None:
     """Render the Ocean Currents page."""
     st.markdown(
-        "Streamlines show the mean ocean surface current flow from NASA's "
-        "OSCAR dataset (1/3° grid, 315 pentad composites averaged). "
-        "Color and thickness indicate current speed — "
-        "note the major gyres, equatorial jets, and western boundary currents."
+        styles.page_header(
+            "Ocean Currents",
+            "NASA OSCAR surface velocity field · 1/3° grid · color and thickness indicate speed",
+        ),
+        unsafe_allow_html=True,
     )
 
     data = _load_streamlines()
     speeds = data["stream_speeds"]
 
     # Sidebar controls
-    st.sidebar.markdown("### Current Display")
+    st.sidebar.markdown(
+        '<p class="pf-gradient-title" style="font-size:1rem;margin:0.5rem 0 0.75rem;">'
+        "Current Display</p>",
+        unsafe_allow_html=True,
+    )
     min_speed = st.sidebar.slider(
         "Min Speed Filter (m/s)",
         min_value=0.0,
@@ -254,10 +254,43 @@ def render() -> None:
 
     # Metrics
     col1, col2, col3 = st.columns(3)
-    col1.metric("Mean Speed", f"{speeds.mean():.3f} m/s")
-    col2.metric("Max Speed", f"{speeds.max():.3f} m/s")
-    col3.metric("Streamlines", f"{len(speeds):,}")
+    col1.markdown(
+        styles.metric_card(
+            "Mean Speed",
+            f"{speeds.mean():.3f}",
+            subtitle="m/s average",
+            icon="🌊",
+            ticker_id="cur-mean",
+            ticker_value=float(speeds.mean()),
+            ticker_decimals=3,
+        ),
+        unsafe_allow_html=True,
+    )
+    col2.markdown(
+        styles.metric_card(
+            "Max Speed",
+            f"{speeds.max():.3f}",
+            subtitle="m/s peak",
+            icon="⚡",
+            ticker_id="cur-max",
+            ticker_value=float(speeds.max()),
+            ticker_decimals=3,
+        ),
+        unsafe_allow_html=True,
+    )
+    col3.markdown(
+        styles.metric_card(
+            "Streamlines",
+            f"{len(speeds):,}",
+            subtitle="vector flow paths",
+            icon="〰️",
+            ticker_id="cur-lines",
+            ticker_value=len(speeds),
+        ),
+        unsafe_allow_html=True,
+    )
 
     # Map
+    st.markdown(styles.section_divider("Current Flow Map"), unsafe_allow_html=True)
     fig = _build_figure(data, min_speed=min_speed, line_scale=line_scale)
     st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
