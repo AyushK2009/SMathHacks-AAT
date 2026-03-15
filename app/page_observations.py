@@ -378,6 +378,12 @@ def render_page() -> None:
     render_map_section(figure)
 
 
+def render() -> None:
+    """Render the observations page for the main app navigation."""
+
+    render_page()
+
+
 def _resolve_first_existing_path(
     candidate_paths: Sequence[str | Path],
     *,

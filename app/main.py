@@ -1,33 +1,64 @@
-import sys
-import os
+"""Main Streamlit entrypoint for the PlasticFlow app."""
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from __future__ import annotations
+
+import os
+import sys
 
 import streamlit as st
 
-# set_page_config is handled by each page module so it can set its own
-# title and icon. main.py only sets it as a fallback when run directly
-# without navigating to a sub-page first.
-try:
-    st.set_page_config(
-        page_title="PlasticFlow",
-        page_icon="🌊",
-        layout="wide",
-    )
-except st.errors.StreamlitAPIException:
-    pass  # already set by the page module
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-page = st.sidebar.radio(
-    "Navigate",
-    ["🗺️ Overview (Map)", "📊 Statistical Insights"],
+APP_TITLE = "PlasticFlow"
+PAGE_OPTIONS = (
+    "Global Observations Map",
+    "Statistical Insights",
 )
 
-if page == "📊 Statistical Insights":
-    import app.page_statistics as page_statistics
-    page_statistics.render()
-elif page == "🗺️ Overview (Map)":
-    st.title("Overview Map")
-    st.info("Coming soon — Lagrangian particle drift simulation.")
 
-st.sidebar.markdown("---")
-st.sidebar.caption("Data source: NOAA NCEI Marine Microplastics Database")
+def render_navigation() -> str:
+    """Render the main app navigation and return the selected page label."""
+
+    return st.sidebar.radio("Navigate", PAGE_OPTIONS)
+
+
+def render_selected_page(selected_page: str) -> None:
+    """Render the page selected in the app sidebar."""
+
+    if selected_page == "Statistical Insights":
+        from app import page_statistics
+
+        page_statistics.render()
+        return
+
+    from app import page_observations
+
+    page_observations.render()
+
+
+def render_footer() -> None:
+    """Render shared sidebar footer content."""
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption("Data source: NOAA NCEI Marine Microplastics Database")
+
+
+def main() -> None:
+    """Render the PlasticFlow Streamlit app."""
+
+    try:
+        st.set_page_config(
+            page_title=APP_TITLE,
+            page_icon="🌊",
+            layout="wide",
+        )
+    except st.errors.StreamlitAPIException:
+        pass
+
+    selected_page = render_navigation()
+    render_selected_page(selected_page)
+    render_footer()
+
+
+if __name__ == "__main__":
+    main()
