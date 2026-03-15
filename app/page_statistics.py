@@ -261,7 +261,7 @@ def render() -> None:
             styles.callout(
                 "The bar height shows how many samples were collected each year — not how "
                 "much plastic exists. A spike in sample count reflects increased research "
-                "activity. Compare the orange line (measured density) independently.",
+                "activity. Compare the blue line (measured density) independently.",
                 kind="warn",
                 icon="⚠️",
             ),
