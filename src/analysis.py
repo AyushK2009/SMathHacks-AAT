@@ -819,14 +819,22 @@ def build_correlation_charts(
 
     figs: list[go.Figure] = []
 
+    from scipy.stats import gaussian_kde
+
     for col in feature_cols:
         if col not in df.columns:
             logger.warning("build_correlation_charts: column %r not found — skipping.", col)
             continue
 
+        # Drop NaNs then drop zero-density rows (non-detections, not meaningful on log scale)
         subset = df[[col, "measurement"]].dropna()
+        subset = subset[subset["measurement"] > 0].copy()
+        if len(subset) < 10:
+            logger.warning("build_correlation_charts: column %r has <10 positive-density rows — skipping.", col)
+            continue
+
         x = subset[col].astype(float).values
-        y = subset["measurement"].astype(float).values
+        y = subset["measurement"].astype(float).values          # raw values throughout
 
         # --- Stats ---
         corr = corr_lookup.get(col, {})
@@ -835,97 +843,112 @@ def build_correlation_charts(
         n = corr.get("n", len(subset))
         abs_rho = abs(rho)
 
-        # --- Annotation color + subtitle by effect size ---
         if abs_rho > 0.3:
-            annot_color = "#2ecc71"
+            annot_color = CORR_STRONG
             subtitle = "Moderate to strong relationship"
         elif abs_rho >= 0.1:
-            annot_color = "#f39c12"
+            annot_color = CORR_MODERATE
             subtitle = "Weak relationship"
         else:
-            annot_color = "#95a5a6"
+            annot_color = NEUTRAL_GREY
             subtitle = "Negligible relationship"
 
         p_val_str = "< 0.0001" if p_val < 0.0001 else f"{p_val:.4f}"
         x_label = axis_labels.get(col, col.replace("_", " ").title())
 
-        # --- Smooth log-space trendline (200 points) ---
-        y_pos = y.clip(min=1e-10)
-        log_y = np.log10(y_pos)
+        # --- Trendline: fit in log-y space, back-transform for raw-scale axis ---
+        log_y = np.log10(y)                           # safe — zeros already removed
         coeffs = np.polyfit(x, log_y, 1)
         x_line = np.linspace(x.min(), x.max(), 200)
         y_line = 10 ** np.polyval(coeffs, x_line)
 
-        # --- Sparse scatter sample (max 2 000 points) ---
+        # Clip trend line to data range so it never renders off-screen
+        y_axis_min = y.min() * 0.1
+        y_axis_max = y.max() * 10
+        y_line = np.clip(y_line, y_axis_min, y_axis_max)
+
+        logger.debug(
+            "Trend line for %r: x %.2f→%.2f  y %.4e→%.4e",
+            col, x_line.min(), x_line.max(), y_line.min(), y_line.max(),
+        )
+
+        # --- KDE-colored scatter (max 3 000 points, raw y values) ---
         rng = np.random.default_rng(42)
-        if len(subset) > 2000:
-            idx = rng.choice(len(subset), 2000, replace=False)
-            x_sample = x[idx]
-            y_sample = y[idx]
-        else:
-            x_sample, y_sample = x, y
+        sample_size = min(3000, len(x))
+        idx = rng.choice(len(x), sample_size, replace=False)
+        xs = x[idx]
+        ys = y[idx]                                   # raw values — log axis handles display
+
+        try:
+            kde = gaussian_kde(np.vstack([xs, np.log10(ys)]))
+            density_colors = kde(np.vstack([xs, np.log10(ys)]))
+        except Exception:
+            density_colors = np.ones(len(xs))
+
+        # --- Axis ranges from actual data ---
+        y_min_log = np.floor(np.log10(y.min()))
+        y_max_log = np.ceil(np.log10(y.max()))
+        x_pad = (x.max() - x.min()) * 0.04
 
         fig = go.Figure()
 
-        # Layer 1 — 2-D density contour background
-        fig.add_trace(go.Histogram2dContour(
-            x=x,
-            y=np.log10(y_pos),
-            colorscale="Blues",
-            contours_coloring="fill",
-            showscale=False,
-            line_width=0,
-            opacity=0.5,
-            hoverinfo="skip",
-            showlegend=False,
-            ncontours=12,
-        ))
-
-        # Layer 2 — sparse scatter overlay
+        # Layer 1 — KDE-colored scatter (raw y, log axis renders it correctly)
         fig.add_trace(go.Scatter(
-            x=x_sample,
-            y=y_sample,
+            x=xs,
+            y=ys,
             mode="markers",
             name="Observations",
-            marker=dict(size=4, color=PALETTE[0], opacity=0.35, line=dict(width=0)),
+            marker=dict(
+                size=4,
+                color=density_colors,
+                colorscale="Blues",
+                opacity=0.65,
+                showscale=False,
+                line=dict(width=0),
+            ),
             hovertemplate=(
-                f"{x_label}: %{{x}}<br>"
-                "Density: %{y:.4f} pieces/m³<extra></extra>"
+                f"{x_label}: %{{x:.2f}}<br>"
+                "Density: %{y:.3e} pieces/m³<extra></extra>"
             ),
             showlegend=False,
         ))
 
-        # Layer 3 — smooth trend line
+        # Layer 2 — prominent regression line (raw y values, displayed on log axis)
         fig.add_trace(go.Scatter(
             x=x_line,
             y=y_line,
             mode="lines",
-            name="Trend",
-            line=dict(color=ACCENT_COLOR, width=2, dash="dash"),
+            name="Regression line",
+            line=dict(color="#E63946", width=3.5, dash="solid"),
             hoverinfo="skip",
             showlegend=True,
         ))
 
         apply_standard_layout(
             fig,
-            f"Density vs. {x_label}<br><sup>{subtitle}</sup>",
+            f"Density vs. {x_label}<br><sup style='font-size:11px'>{subtitle}</sup>",
         )
         fig.update_layout(
             height=420,
-            margin=dict(l=70, r=30, t=80, b=60),
+            margin=dict(l=70, r=40, t=80, b=60),
             showlegend=True,
+            legend=dict(x=0.98, y=0.05, xanchor="right", yanchor="bottom",
+                        bgcolor="rgba(255,255,255,0.85)", borderwidth=0),
         )
         fig.update_xaxes(
             title_text=x_label,
+            range=[x.min() - x_pad, x.max() + x_pad],
             showgrid=True,
             gridcolor="#f0f0f0",
+            tickfont=dict(size=12),
         )
         fig.update_yaxes(
-            title_text="Density (log scale)",
+            title_text="Density (pieces/m³)",
             type="log",
-            tickformat=".0e",
+            range=[y_min_log - 0.3, y_max_log + 0.3],
             showgrid=True,
             gridcolor="#f0f0f0",
+            tickfont=dict(size=12),
         )
 
         fig.add_annotation(
@@ -935,10 +958,18 @@ def build_correlation_charts(
             xanchor="left", yanchor="top",
             showarrow=False,
             font=dict(size=12, color=annot_color, family="Inter, Arial, sans-serif"),
-            bgcolor="rgba(255,255,255,0.85)",
+            bgcolor="rgba(255,255,255,0.90)",
             bordercolor=annot_color,
             borderwidth=1.5,
             borderpad=6,
+        )
+
+        assert len(fig.data) >= 2, (
+            f"Chart for '{col}' has only {len(fig.data)} traces — expected scatter + trendline."
+        )
+        logger.info(
+            "Chart '%s': %d traces, %d points plotted, y-axis log range [%.1f, %.1f]",
+            col, len(fig.data), len(xs), y_min_log - 0.3, y_max_log + 0.3,
         )
 
         figs.append(fig)
