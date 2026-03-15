@@ -38,7 +38,6 @@ def _fmt_density(v: float) -> str:
 # Data loading — parquet preferred, CSV fallback
 # ---------------------------------------------------------------------------
 
-_PARQUET_PATH = "data/NOAA.parquet"
 _CSV_PATH = "data/NOAA.csv"
 
 _FEATURE_COLS = ["latitude", "longitude", "year"]
@@ -47,8 +46,6 @@ _FEATURE_COLS = ["latitude", "longitude", "year"]
 @st.cache_data
 def _load_data() -> pd.DataFrame:
     """Load cleaned microplastics data; parquet if available, else CSV."""
-    if os.path.exists(_PARQUET_PATH):
-        return pd.read_parquet(_PARQUET_PATH)
     if not os.path.exists(_CSV_PATH):
         raise FileNotFoundError(_CSV_PATH)
     return load_noaa(_CSV_PATH)
