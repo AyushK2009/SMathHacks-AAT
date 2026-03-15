@@ -7,4 +7,5 @@ plotly
 pydeck
 streamlit
 scikit-learn
+
 pyarrow
