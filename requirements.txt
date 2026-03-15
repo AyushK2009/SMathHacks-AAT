@@ -7,5 +7,5 @@ plotly
 pydeck
 streamlit
 scikit-learn
-
+altair<5
 pyarrow
