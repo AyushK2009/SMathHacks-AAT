@@ -89,6 +89,60 @@ CHART_THEME: dict = dict(
 
 
 # ---------------------------------------------------------------------------
+# Ocean landmark lookup — used to label cluster centers
+# ---------------------------------------------------------------------------
+
+# (lat, lon, name) — well-known ocean regions relevant to microplastics
+_OCEAN_LANDMARKS: list[tuple[float, float, str]] = [
+    # Major accumulation gyres
+    (27.0,  -68.0, "N. Atlantic Gyre (Sargasso Sea)"),
+    (28.0, -145.0, "N. Pacific Gyre (Great Pacific Garbage Patch)"),
+    (-38.0, -115.0, "S. Pacific Gyre"),
+    (-35.0,  -20.0, "S. Atlantic Gyre"),
+    (-30.0,   85.0, "Indian Ocean Gyre"),
+    # Seas, bays, straits
+    (40.0,   10.0, "Mediterranean Sea"),
+    (56.0,   -5.0, "Irish Sea"),
+    (22.0,   92.0, "Bay of Bengal"),
+    (10.0,   78.0, "Gulf of Mannar"),
+    (33.0,  135.0, "Philippine Sea"),
+    (33.0,   35.0, "Eastern Mediterranean"),
+    (25.0,  122.0, "Taiwan Strait"),
+    (22.0,  114.0, "South China Sea"),
+    (11.0,  101.0, "Gulf of Thailand"),
+    (30.0,  122.0, "East China Sea"),
+    (1.0,   -47.0, "Equatorial Atlantic"),
+    (-20.0, 117.0, "NW Australia"),
+    (-18.0, 178.0, "Fiji Islands"),
+    (-28.0, -106.0, "Easter Island"),
+    (-15.0, -148.0, "French Polynesia"),
+    (60.0, -149.0, "Gulf of Alaska"),
+    (48.0, -124.0, "Strait of Juan de Fuca"),
+    (0.0,   -90.0, "Galápagos Islands"),
+    (2.5,  -136.0, "Central Pacific"),
+    (-55.0,  -68.0, "Drake Passage"),
+    (-34.0,  152.0, "Tasman Sea"),
+    (-43.0,  147.0, "Tasmania"),
+    (-5.0,    40.0, "East Africa Coast"),
+    (-10.0, -141.0, "South Pacific"),
+]
+
+
+def _nearest_landmark(lat: float, lon: float) -> str:
+    """Return the name of the nearest known ocean landmark to (lat, lon)."""
+    best_name = "Open Ocean"
+    best_dist = float("inf")
+    for lo_lat, lo_lon, name in _OCEAN_LANDMARKS:
+        dlat = lat - lo_lat
+        dlon = (lon - lo_lon + 180) % 360 - 180  # handle antimeridian wrap
+        dist = (dlat ** 2 + dlon ** 2) ** 0.5
+        if dist < best_dist:
+            best_dist = dist
+            best_name = name
+    return best_name
+
+
+# ---------------------------------------------------------------------------
 # Defensive validation
 # ---------------------------------------------------------------------------
 
@@ -218,6 +272,11 @@ def get_cluster_summary(df: pd.DataFrame) -> pd.DataFrame:
     # Renumber from 1 regardless of DBSCAN's 0-based labels
     summary.insert(1, "label", [f"Cluster {i + 1}" for i in range(len(summary))])
 
+    # Add nearest ocean landmark name for each cluster center
+    summary["location"] = summary.apply(
+        lambda r: _nearest_landmark(r["center_lat"], r["center_lon"]), axis=1
+    )
+
     return summary
 
 
@@ -329,7 +388,9 @@ def build_basin_chart(basin_stats: pd.DataFrame) -> go.Figure:
     Returns:
         A Plotly Figure ready for ``st.plotly_chart``.
     """
-    basins = basin_stats.index.tolist()
+    # Sort ascending so highest value appears at top of horizontal chart
+    basin_stats_sorted = basin_stats.sort_values("mean", ascending=True)
+    basins = basin_stats_sorted.index.tolist()
     n = len(basins)
     bar_colors = [PALETTE[i % len(PALETTE)] for i in range(n)]
 
@@ -338,38 +399,49 @@ def build_basin_chart(basin_stats: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
     fig.add_trace(go.Bar(
-        x=basins,
-        y=basin_stats["mean"],
-        error_y=dict(type="data", array=basin_stats["std"].tolist(), visible=True,
+        y=basins,
+        x=basin_stats_sorted["mean"],
+        orientation="h",
+        error_x=dict(type="data", array=basin_stats_sorted["std"].tolist(), visible=True,
                      color=NEUTRAL_GREY, thickness=1.5, width=6),
-        marker=dict(color=bar_colors, opacity=0.85, line=dict(width=0)),
-        customdata=basin_stats[["median", "std", "count"]].values,
+        marker=dict(color=bar_colors, opacity=0.90, line=dict(width=0)),
+        customdata=basin_stats_sorted[["median", "std", "count"]].values,
         hovertemplate=(
-            "<b>%{x}</b><br>"
-            "Mean: %{y:.4f} pieces/m³<br>"
+            "<b>%{y}</b><br>"
+            "Mean: %{x:.4f} pieces/m³<br>"
             "Median: %{customdata[0]:.4f} pieces/m³<br>"
             "Std dev: %{customdata[1]:.4f}<br>"
             "Observations: %{customdata[2]:,}<extra></extra>"
         ),
         name="Mean density",
+        # Value labels on each bar
+        text=[f"{v:.4f}" for v in basin_stats_sorted["mean"]],
+        textposition="outside",
+        textfont=dict(size=11, family="Inter, Arial, sans-serif"),
     ))
 
-    # Global mean reference line
-    fig.add_hline(
-        y=global_mean,
+    # Global mean reference line (vertical for horizontal chart)
+    fig.add_vline(
+        x=global_mean,
         line=dict(color=MUTED_GREY, width=1.5, dash="dash"),
         annotation_text="Global Mean",
-        annotation_position="top right",
+        annotation_position="top",
         annotation_font=dict(size=11, color=MUTED_GREY, family="Inter"),
     )
 
     apply_standard_layout(fig, "Mean Microplastic Density by Ocean Basin")
-    fig.update_layout(showlegend=False)
-    fig.update_xaxes(title_text="Ocean Basin", showgrid=False)
-    fig.update_yaxes(
+    fig.update_layout(
+        showlegend=False,
+        height=420,
+        margin=dict(l=160, r=80, t=60, b=60),
+    )
+    fig.update_yaxes(title_text="Ocean Basin", tickfont=dict(size=13), showgrid=False)
+    fig.update_xaxes(
         title_text="Mean Density (pieces/m³)",
-        rangemode="tozero",
-        tickformat=",.2f",
+        type="log",
+        tickformat=".2g",
+        showgrid=True,
+        gridcolor="#f0f0f0",
     )
 
     return fig
@@ -446,23 +518,29 @@ def build_temporal_chart(temporal_df: pd.DataFrame) -> go.Figure:
     # --- Layout ---
     apply_standard_layout(fig, "Temporal Trends: Research Activity vs. Measured Density")
     fig.update_layout(
+        height=420,
         legend=dict(
             x=0.01, y=0.99, xanchor="left", yanchor="top",
             bgcolor="rgba(255,255,255,0.85)", borderwidth=0,
+            font=dict(size=13),
         ),
-        bargap=0.2,
+        bargap=0.3,
+        margin=dict(l=70, r=80, t=60, b=60),
     )
-    fig.update_xaxes(title_text="Year", showgrid=False)
+    fig.update_xaxes(title_text="Year", showgrid=False, tickfont=dict(size=12), dtick=2)
     fig.update_yaxes(
         title_text="Number of Observations",
         gridcolor="#f0f0f0", gridwidth=1, showline=False,
         rangemode="tozero", tickformat=",d",
+        tickfont=dict(size=12),
         secondary_y=False,
     )
     fig.update_yaxes(
         title_text="Mean Density (pieces/m³)",
         showgrid=False, showline=False,
-        rangemode="tozero", tickformat=",.4f",
+        type="log",
+        tickformat=".2g",
+        tickfont=dict(size=12),
         secondary_y=True,
     )
 
@@ -523,12 +601,12 @@ def build_cluster_map(df: pd.DataFrame, cluster_summary: pd.DataFrame) -> go.Fig
         mode="markers",
         name="Observations",
         marker=dict(
-            size=4,
+            size=6,
             color=log_density,
             colorscale="YlOrRd",
             cmin=cmin,
             cmax=cmax,
-            opacity=0.65,
+            opacity=0.75,
             showscale=True,
             colorbar=dict(
                 title=dict(text="Density<br>(pieces/m³)", font=dict(size=11)),
@@ -593,7 +671,7 @@ def build_cluster_map(df: pd.DataFrame, cluster_summary: pd.DataFrame) -> go.Fig
             font=dict(size=11, family="Inter, Arial, sans-serif"),
         ),
         margin=dict(l=0, r=0, t=60, b=0),
-        height=550,
+        height=620,
     )
 
     return fig
@@ -675,42 +753,51 @@ def build_correlation_charts(
 
         fig = go.Figure()
 
-        # Scatter points
+        # Scatter points — low opacity so trendline reads clearly
         fig.add_trace(go.Scatter(
             x=x,
             y=y,
             mode="markers",
             name="Observations",
-            marker=dict(size=5, color=PALETTE[0], opacity=0.4, line=dict(width=0)),
+            marker=dict(size=5, color=PALETTE[0], opacity=0.2, line=dict(width=0)),
             hovertemplate=(
                 f"{x_label}: %{{x}}<br>"
                 "Density: %{y:.4f} pieces/m³<extra></extra>"
             ),
         ))
 
-        # Trendline
+        # Trendline — solid, thick, high-contrast so it reads over the scatter
         fig.add_trace(go.Scatter(
             x=x_sorted,
             y=y_trend,
             mode="lines",
-            name="OLS trend",
-            line=dict(color=ACCENT_COLOR, width=2, dash="dash"),
+            name="Regression line",
+            line=dict(color="#E63946", width=3.5, dash="solid"),
             hoverinfo="skip",
         ))
 
         apply_standard_layout(fig, f"Density vs. {x_label}")
-        fig.update_xaxes(title_text=x_label)
-        fig.update_yaxes(title_text="Density (pieces/m³)", type="log")
+        fig.update_layout(height=380, margin=dict(l=70, r=30, t=60, b=60))
+        fig.update_xaxes(title_text=x_label, tickfont=dict(size=12))
+        fig.update_yaxes(
+            title_text="Density (pieces/m³)",
+            type="log",
+            tickformat=".2g",
+            tickfont=dict(size=12),
+            gridcolor="#f0f0f0",
+        )
 
         fig.add_annotation(
-            text=f"Spearman ρ = {rho:.3f}, p = {p_val:.4f}, n = {n:,}",
+            text=f"Spearman ρ = {rho:.3f}  |  p = {p_val:.4f}  |  n = {n:,}",
             xref="paper", yref="paper",
             x=0.02, y=0.97,
             xanchor="left", yanchor="top",
             showarrow=False,
             font=dict(size=12, color=annot_color, family="Inter, Arial, sans-serif"),
-            bgcolor="rgba(255,255,255,0.85)",
-            borderpad=4,
+            bgcolor="rgba(255,255,255,0.9)",
+            bordercolor=annot_color,
+            borderwidth=1,
+            borderpad=5,
         )
 
         figs.append(fig)
