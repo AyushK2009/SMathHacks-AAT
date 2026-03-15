@@ -2,7 +2,7 @@ data/
 data/*.nc
 data/**/*.nc
 data/*.parquet
-results/
+# results/
 __pycache__/
 .venv/
 *.pkl
