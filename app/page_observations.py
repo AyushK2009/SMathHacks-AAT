@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -27,6 +28,14 @@ REQUIRED_MAP_COLUMNS = (
     "ocean",
     "sampling_method",
 )
+OBSERVATION_COLUMN_ALIASES = {
+    "latitude": ("latitude_(degree)", "lat"),
+    "longitude": ("longitude_(degree)", "lon"),
+    "density": ("microplastics_measurement", "measurement"),
+    "date": ("sample_date", "observation_date"),
+    "ocean": ("ocean_basin",),
+    "sampling_method": ("marine_setting", "sampling"),
+}
 DEFAULT_DATASET_CANDIDATES = (
     REPO_ROOT / "data" / "microplastics_cleaned.parquet",
     REPO_ROOT / "data" / "microplastics_cleaned.csv",
@@ -56,6 +65,22 @@ MUTED_TEXT_COLOR = "#91a7c0"
 FONT_FAMILY = "'IBM Plex Sans', 'Segoe UI', sans-serif"
 EMPTY_MAP_CENTER = {"lat": 15.0, "lon": 0.0}
 EMPTY_MAP_ZOOM = 0.8
+MAP_TILE_SOURCE = ["https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png"]
+MAP_LABEL_TILE_SOURCE = ["https://basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}.png"]
+MAP_TILE_ATTRIBUTION = "© CARTO © OpenStreetMap contributors"
+DENSITY_TICK_CANDIDATES = (
+    0.0,
+    0.001,
+    0.01,
+    0.1,
+    1.0,
+    10.0,
+    100.0,
+    1_000.0,
+    10_000.0,
+    100_000.0,
+    1_000_000.0,
+)
 PLOTLY_CHART_CONFIG = {
     "displaylogo": False,
     "scrollZoom": True,
@@ -148,13 +173,14 @@ def validate_observations_dataframe(
 def prepare_observations_data(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize the cleaned observations DataFrame for filtering and mapping."""
 
-    validate_observations_dataframe(df)
+    prepared_df = _normalize_input_columns(df)
+    prepared_df = _coalesce_observation_columns(prepared_df)
+    validate_observations_dataframe(prepared_df)
 
-    prepared_df = df.copy()
     prepared_df["latitude"] = pd.to_numeric(prepared_df["latitude"], errors="coerce")
     prepared_df["longitude"] = pd.to_numeric(prepared_df["longitude"], errors="coerce")
     prepared_df["density"] = pd.to_numeric(prepared_df["density"], errors="coerce")
-    prepared_df["date"] = pd.to_datetime(prepared_df["date"], errors="coerce")
+    prepared_df["date"] = _parse_observation_dates(prepared_df["date"])
     prepared_df["ocean"] = _safe_text_series(prepared_df["ocean"], default="")
     prepared_df["sampling_method"] = _safe_text_series(
         prepared_df["sampling_method"],
@@ -323,7 +349,7 @@ def render_page_header() -> None:
     """Render the title and intro copy for the observations page."""
 
     st.title(PAGE_TITLE)
-    st.caption("Stage 1A observations explorer")
+    st.caption("NOAA marine microplastics observations")
     st.write(
         "Each point represents a NOAA microplastics observation colored by measured "
         "density, making it easier to compare where concentrations appear strongest "
@@ -442,6 +468,85 @@ def _read_tabular_dataset(dataset_path: Path) -> pd.DataFrame:
     raise ValueError(f"Unsupported observations dataset format: {dataset_path.suffix}")
 
 
+def _normalize_input_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of the input DataFrame with normalized column names."""
+
+    normalized_df = df.copy()
+    normalized_df.columns = [_normalize_column_name(column) for column in normalized_df.columns]
+    return normalized_df
+
+
+def _normalize_column_name(column: object) -> str:
+    """Return a normalized snake-case representation of a column name."""
+
+    return (
+        str(column)
+        .strip()
+        .lower()
+        .replace("/", "_")
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+
+def _coalesce_observation_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Backfill canonical observation columns from known source-column aliases."""
+
+    prepared_df = df.copy()
+
+    for canonical_column, aliases in OBSERVATION_COLUMN_ALIASES.items():
+        candidate_columns = [
+            column_name
+            for column_name in (canonical_column, *aliases)
+            if column_name in prepared_df.columns
+        ]
+        if not candidate_columns:
+            continue
+
+        coalesced_series: pd.Series | None = None
+        for candidate_column in candidate_columns:
+            candidate_series = _nullify_blank_strings(prepared_df[candidate_column])
+            if coalesced_series is None:
+                coalesced_series = candidate_series
+            else:
+                coalesced_series = coalesced_series.where(
+                    coalesced_series.notna(),
+                    candidate_series,
+                )
+
+        if coalesced_series is not None:
+            prepared_df[canonical_column] = coalesced_series
+
+    return prepared_df
+
+
+def _nullify_blank_strings(series: pd.Series) -> pd.Series:
+    """Return a series where empty strings are treated as missing values."""
+
+    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
+        text_series = series.astype("string").str.strip()
+        return text_series.replace("", pd.NA)
+    return series
+
+
+def _parse_observation_dates(series: pd.Series) -> pd.Series:
+    """Parse observation dates while handling NOAA-style timestamp strings."""
+
+    parsed_dates = pd.to_datetime(
+        series,
+        errors="coerce",
+        format="%m/%d/%Y %I:%M:%S %p",
+    )
+    remaining_mask = parsed_dates.isna() & series.notna()
+    if remaining_mask.any():
+        parsed_dates.loc[remaining_mask] = pd.to_datetime(
+            series.loc[remaining_mask],
+            errors="coerce",
+        )
+
+    return parsed_dates
+
+
 def _safe_text_series(series: pd.Series, *, default: str) -> pd.Series:
     """Return a trimmed string series with empty values replaced by a default."""
 
@@ -501,7 +606,7 @@ def _build_map_display_frame(df: pd.DataFrame) -> pd.DataFrame:
     """Return a plotting-ready DataFrame with formatted hover values."""
 
     display_df = df.copy()
-    display_df["density_display"] = display_df["density"].map(lambda value: f"{value:,.3f}")
+    display_df["density_display"] = display_df["density"].map(_format_density_value)
     display_df["date_display"] = display_df["date"].dt.strftime("%b %d, %Y").fillna("Unknown")
     display_df["ocean_display"] = _safe_text_series(display_df["ocean"], default="Unknown")
     display_df["sampling_method_display"] = _safe_text_series(
@@ -514,6 +619,7 @@ def _build_map_display_frame(df: pd.DataFrame) -> pd.DataFrame:
 def _add_observation_trace(figure: go.Figure, display_df: pd.DataFrame) -> None:
     """Add the main observations point layer to the map figure."""
 
+    density_scale = _build_density_color_scale(display_df["density"])
     customdata = list(
         zip(
             display_df["density_display"],
@@ -532,15 +638,21 @@ def _add_observation_trace(figure: go.Figure, display_df: pd.DataFrame) -> None:
             customdata=customdata,
             marker={
                 "size": 8,
-                "opacity": 0.82,
+                "opacity": 0.72,
                 "allowoverlap": True,
-                "color": display_df["density"],
+                "color": density_scale["color_values"],
                 "colorscale": DENSITY_COLOR_SCALE,
-                "cmin": float(display_df["density"].min()),
-                "cmax": float(display_df["density"].max()),
+                "cmin": density_scale["cmin"],
+                "cmax": density_scale["cmax"],
                 "colorbar": {
-                    "title": {"text": "Measured Density"},
-                    "tickformat": ",.3f",
+                    "title": {
+                        "text": (
+                            "Measured Density"
+                            "<br><sup>pieces/m3, log scale, capped at 90th percentile</sup>"
+                        )
+                    },
+                    "tickvals": density_scale["tickvals"],
+                    "ticktext": density_scale["ticktext"],
                     "thickness": 16,
                     "len": 0.78,
                     "bgcolor": "rgba(7, 19, 31, 0.65)",
@@ -602,9 +714,23 @@ def _build_map_layout(
 
     return {
         "mapbox": {
-            "style": "carto-darkmatter",
+            "style": "white-bg",
             "center": center,
             "zoom": zoom,
+            "layers": [
+                {
+                    "below": "traces",
+                    "sourcetype": "raster",
+                    "sourceattribution": MAP_TILE_ATTRIBUTION,
+                    "source": MAP_TILE_SOURCE,
+                },
+                {
+                    "below": "traces",
+                    "sourcetype": "raster",
+                    "sourceattribution": MAP_TILE_ATTRIBUTION,
+                    "source": MAP_LABEL_TILE_SOURCE,
+                }
+            ],
         },
         "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
         "height": 720,
@@ -689,6 +815,63 @@ def _render_summary_card(
         """,
         unsafe_allow_html=True,
     )
+
+
+def _build_density_color_scale(density_series: pd.Series) -> dict[str, Any]:
+    """Return clipped log-scaled colors and a readable density legend."""
+
+    density_values = density_series.astype(float)
+    positive_values = density_values.loc[density_values > 0]
+
+    if positive_values.empty:
+        floor_density = 1e-6
+        upper_density = 1.0
+    else:
+        floor_density = max(float(positive_values.min()) / 2.0, 1e-6)
+        upper_density = float(positive_values.quantile(0.90))
+        upper_density = max(upper_density, float(positive_values.median()), floor_density * 10.0)
+
+    clipped_density = density_values.clip(lower=0.0, upper=upper_density)
+    color_values = np.log10(clipped_density + floor_density)
+    cmin = float(np.log10(floor_density))
+    cmax = float(np.log10(upper_density + floor_density))
+
+    tick_values = [
+        tick_value
+        for tick_value in DENSITY_TICK_CANDIDATES
+        if tick_value <= upper_density * 1.01
+    ]
+    if 0.0 not in tick_values:
+        tick_values.insert(0, 0.0)
+    if upper_density > tick_values[-1]:
+        tick_values.append(upper_density)
+
+    tickvals = [float(np.log10(tick_value + floor_density)) for tick_value in tick_values]
+    ticktext = [_format_density_value(tick_value) for tick_value in tick_values]
+
+    return {
+        "color_values": color_values,
+        "cmin": cmin,
+        "cmax": cmax,
+        "tickvals": tickvals,
+        "ticktext": ticktext,
+        "upper_density": upper_density,
+    }
+
+
+def _format_density_value(value: float) -> str:
+    """Return a compact human-readable density label."""
+
+    numeric_value = float(value)
+    if numeric_value == 0:
+        return "0"
+    if abs(numeric_value) >= 1_000:
+        return f"{numeric_value:,.0f}"
+    if abs(numeric_value) >= 1:
+        return f"{numeric_value:,.2f}"
+    if abs(numeric_value) >= 0.01:
+        return f"{numeric_value:,.3f}"
+    return f"{numeric_value:.2e}"
 
 
 def _format_year_range(year_range: tuple[int, int]) -> str:
