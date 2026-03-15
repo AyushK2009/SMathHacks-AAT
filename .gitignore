@@ -6,6 +6,5 @@ data/*.parquet
 __pycache__/
 .venv/
 *.pkl
-*.pyc
 .DS_Store
 CLAUDE.md
