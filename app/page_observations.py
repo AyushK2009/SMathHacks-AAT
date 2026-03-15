@@ -65,9 +65,13 @@ MUTED_TEXT_COLOR = "#91a7c0"
 FONT_FAMILY = "'IBM Plex Sans', 'Segoe UI', sans-serif"
 EMPTY_MAP_CENTER = {"lat": 15.0, "lon": 0.0}
 EMPTY_MAP_ZOOM = 0.8
-MAP_TILE_SOURCE = ["https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png"]
-MAP_LABEL_TILE_SOURCE = ["https://basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}.png"]
-MAP_TILE_ATTRIBUTION = "© CARTO © OpenStreetMap contributors"
+MAP_TILE_SOURCE = [
+    "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+]
+MAP_LABEL_TILE_SOURCE = [
+    "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+]
+MAP_TILE_ATTRIBUTION = "Source: Esri, HERE, Garmin, FAO, NOAA, USGS"
 DENSITY_TICK_CANDIDATES = (
     0.0,
     0.001,
