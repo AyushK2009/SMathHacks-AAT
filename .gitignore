@@ -2,6 +2,7 @@ data/
 data/*.nc
 data/**/*.nc
 data/*.parquet
+altair<5
 # results/
 __pycache__/
 .venv/
