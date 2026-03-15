@@ -169,10 +169,11 @@ def validate_dataframe(df: pd.DataFrame, required_cols: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def compute_basin_statistics(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute descriptive statistics of microplastics density by ocean basin.
+    """Compute log-scale descriptive statistics of microplastics density by ocean basin.
 
-    Only rows with valid ``ocean`` and ``measurement`` values are included;
-    NaNs in other columns are left untouched.
+    All statistics are computed on log10-transformed density to handle the
+    extreme right-skew and outliers in pollution data. Both log-scale values
+    (used for plotting) and back-transformed display values are returned.
 
     Args:
         df: Cleaned microplastics DataFrame containing at least the columns
@@ -180,23 +181,42 @@ def compute_basin_statistics(df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         A DataFrame indexed by ocean basin with columns:
-        ``mean``, ``median``, ``std``, ``count``, ``p25``, ``p75``.
-        Sorted descending by mean density.
+        ``log_mean``, ``log_median``, ``log_q25``, ``log_q75``, ``log_std``,
+        ``mean``, ``median``, ``p25``, ``p75``, ``count``.
+        Sorted descending by log_mean.
     """
     validate_dataframe(df, ["ocean", "measurement"])
-    subset = df.dropna(subset=["ocean", "measurement"])
+    subset = df.dropna(subset=["ocean", "measurement"]).copy()
+    # Clip to avoid log(0); any non-positive value is set to 1e-10
+    subset["log_measurement"] = np.log10(subset["measurement"].clip(lower=1e-10))
 
-    stats_df = subset.groupby("ocean")["measurement"].agg(
-        mean="mean",
-        median="median",
-        std="std",
-        count="count",
-        p25=lambda s: s.quantile(0.25),
-        p75=lambda s: s.quantile(0.75),
-    )
+    def _basin_stats(s: pd.Series) -> pd.Series:
+        log_mean   = s.mean()
+        log_median = s.median()
+        log_q25    = s.quantile(0.25)
+        log_q75    = s.quantile(0.75)
+        log_std    = s.std()
+        return pd.Series({
+            "log_mean":   log_mean,
+            "log_median": log_median,
+            "log_q25":    log_q25,
+            "log_q75":    log_q75,
+            "log_std":    log_std,
+            # back-transformed for display / hover
+            "mean":       10 ** log_mean,
+            "median":     10 ** log_median,
+            "p25":        10 ** log_q25,
+            "p75":        10 ** log_q75,
+            "count":      float(len(s)),
+        })
 
+    # Build stats explicitly to avoid pandas-version-dependent apply() behaviour
+    # (apply on a SeriesGroupBy may return a MultiIndex Series instead of DataFrame)
+    stats_df = pd.DataFrame(
+        {ocean: _basin_stats(grp) for ocean, grp in subset.groupby("ocean")["log_measurement"]}
+    ).T
     stats_df.index.name = "ocean_basin"
-    stats_df = stats_df.sort_values("mean", ascending=False)
+    stats_df = stats_df.sort_values("log_mean", ascending=False)
     return stats_df
 
 
@@ -372,76 +392,163 @@ def apply_standard_layout(fig: go.Figure, title: str) -> go.Figure:
 # Chart-builder functions — return Plotly figures
 # ---------------------------------------------------------------------------
 
-def build_basin_chart(basin_stats: pd.DataFrame) -> go.Figure:
-    """Build a bar chart of mean microplastics density by ocean basin.
+def _fmt_density(v: float) -> str:
+    """Format a density value for bar annotations: K suffix for >= 1000."""
+    if v >= 1000:
+        return f"{v / 1000:.1f}K"
+    if v >= 1:
+        return f"{v:.1f}"
+    return f"{v:.3f}"
 
-    Each bar represents one ocean basin's mean density with ±1 SD error bars.
-    A horizontal dashed line marks the global mean across all basins.
-    Hover tooltips show basin name, mean, median, std, and count.
-    The ``CHART_THEME`` is applied to the returned figure.
+
+def build_basin_chart(basin_stats: pd.DataFrame) -> go.Figure:
+    """Build a vertical grouped bar chart of microplastic density by ocean basin.
+
+    Uses log-scale statistics from :func:`compute_basin_statistics` so that
+    extreme outliers cannot break the axis. Three visual layers convey
+    distributional richness:
+
+    - Shaded IQR bands (background)  — q25 to q75 spread
+    - Mean bars (primary)             — log-scale mean per basin
+    - Median diamond markers          — reveals skew when mean >> median
 
     Args:
-        basin_stats: Output of :func:`compute_basin_statistics` — a DataFrame
-            indexed by ``ocean_basin`` with columns ``mean``, ``median``,
-            ``std``, ``count``, ``p25``, ``p75``.
+        basin_stats: Output of :func:`compute_basin_statistics`.
 
     Returns:
         A Plotly Figure ready for ``st.plotly_chart``.
     """
-    # Sort ascending so highest value appears at top of horizontal chart
-    basin_stats_sorted = basin_stats.sort_values("mean", ascending=True)
-    basins = basin_stats_sorted.index.tolist()
+    # Sort descending by mean so highest basin is on the left
+    bs = basin_stats.sort_values("log_mean", ascending=False)
+    basins = bs.index.tolist()
     n = len(basins)
     bar_colors = [PALETTE[i % len(PALETTE)] for i in range(n)]
 
-    global_mean = basin_stats["mean"].mean()
+    global_log_mean = float(bs["log_mean"].mean())
+    global_mean_display = 10 ** global_log_mean
 
     fig = go.Figure()
 
+    # ── Layer 1: IQR range bands (one invisible bar from q25 to q75) ─────
+    # Plotly doesn't have native floating bars on log axes cleanly, so we
+    # add a thin rectangle shape per basin using fig.add_shape.
+    for i, basin in enumerate(basins):
+        row = bs.loc[basin]
+        # Convert log values to actual for shape coordinates (log axis handles it)
+        fig.add_shape(
+            type="rect",
+            x0=i - 0.3, x1=i + 0.3,
+            y0=row["log_q25"], y1=row["log_q75"],
+            xref="x", yref="y",
+            fillcolor=bar_colors[i],
+            opacity=0.18,
+            line_width=0,
+            layer="below",
+        )
+
+    # ── Layer 2: Mean bars ────────────────────────────────────────────────
     fig.add_trace(go.Bar(
-        y=basins,
-        x=basin_stats_sorted["mean"],
-        orientation="h",
-        error_x=dict(type="data", array=basin_stats_sorted["std"].tolist(), visible=True,
-                     color=NEUTRAL_GREY, thickness=1.5, width=6),
-        marker=dict(color=bar_colors, opacity=0.90, line=dict(width=0)),
-        customdata=basin_stats_sorted[["median", "std", "count"]].values,
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            "Mean: %{x:.4f} pieces/m³<br>"
-            "Median: %{customdata[0]:.4f} pieces/m³<br>"
-            "Std dev: %{customdata[1]:.4f}<br>"
-            "Observations: %{customdata[2]:,}<extra></extra>"
+        x=basins,
+        y=bs["log_mean"].tolist(),
+        name="Mean Density",
+        marker=dict(
+            color=bar_colors,
+            opacity=0.88,
+            line=dict(width=1.5, color="white"),
         ),
-        name="Mean density",
-        # Value labels on each bar
-        text=[f"{v:.4f}" for v in basin_stats_sorted["mean"]],
-        textposition="outside",
-        textfont=dict(size=11, family="Inter, Arial, sans-serif"),
+        width=0.5,
+        customdata=bs[["mean", "median", "p25", "p75", "count"]].values,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Mean: %{customdata[0]:.3f} pieces/m³<br>"
+            "Median: %{customdata[1]:.3f} pieces/m³<br>"
+            "IQR: %{customdata[2]:.3f} – %{customdata[3]:.3f}<br>"
+            "Observations: %{customdata[4]:,.0f}<extra></extra>"
+        ),
     ))
 
-    # Global mean reference line (vertical for horizontal chart)
-    fig.add_vline(
-        x=global_mean,
-        line=dict(color=MUTED_GREY, width=1.5, dash="dash"),
-        annotation_text="Global Mean",
-        annotation_position="top",
-        annotation_font=dict(size=11, color=MUTED_GREY, family="Inter"),
+    # ── Layer 3: Median diamond markers ──────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=basins,
+        y=bs["log_median"].tolist(),
+        name="Median",
+        mode="markers",
+        marker=dict(
+            symbol="diamond",
+            size=12,
+            color="white",
+            line=dict(color=PALETTE[1], width=2.5),
+        ),
+        customdata=bs["median"].values,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Median: %{customdata:.3f} pieces/m³<extra></extra>"
+        ),
+    ))
+
+    # ── Global mean reference line ────────────────────────────────────────
+    fig.add_hline(
+        y=global_log_mean,
+        line_dash="dot",
+        line_color="#e74c3c",
+        line_width=2,
+        annotation_text=f"Global Mean: {_fmt_density(global_mean_display)} pieces/m³",
+        annotation_position="top right",
+        annotation_font=dict(color="#e74c3c", size=11, family="Inter, Arial, sans-serif"),
     )
 
-    apply_standard_layout(fig, "Mean Microplastic Density by Ocean Basin")
-    fig.update_layout(
-        showlegend=False,
-        height=420,
-        margin=dict(l=160, r=80, t=60, b=60),
+    # ── Value annotations above each bar ─────────────────────────────────
+    for i, basin in enumerate(basins):
+        row = bs.loc[basin]
+        fig.add_annotation(
+            x=basin,
+            y=row["log_mean"] + 0.10,
+            text=_fmt_density(row["mean"]),
+            showarrow=False,
+            font=dict(size=11, color="#444444", family="Inter, Arial, sans-serif"),
+            yref="y",
+        )
+
+    # ── IQR legend proxy (invisible bar for legend entry) ─────────────────
+    fig.add_trace(go.Bar(
+        x=[None], y=[None],
+        name="Interquartile Range (25th–75th %ile)",
+        marker=dict(color=PALETTE[0], opacity=0.25),
+        showlegend=True,
+    ))
+
+    # ── Layout ────────────────────────────────────────────────────────────
+    apply_standard_layout(
+        fig,
+        "Microplastic Density by Ocean Basin"
+        "<br><sup style='font-size:11px;color:#666'>Mean density shown on log scale · "
+        "Diamond markers show median · Shaded bands show interquartile range</sup>",
     )
-    fig.update_yaxes(title_text="Ocean Basin", tickfont=dict(size=13), showgrid=False)
+    fig.update_layout(
+        height=500,
+        showlegend=True,
+        legend=dict(
+            x=0.98, y=0.98, xanchor="right", yanchor="top",
+            bgcolor="rgba(255,255,255,0.85)", borderwidth=0,
+            font=dict(size=11),
+        ),
+        bargap=0.25,
+        margin=dict(l=70, r=40, t=80, b=60),
+        barmode="overlay",
+        xaxis=dict(type="category"),
+    )
     fig.update_xaxes(
-        title_text="Mean Density (pieces/m³)",
-        type="log",
-        tickformat=".2g",
+        title_text="Ocean Basin",
+        tickfont=dict(size=13),
+        showgrid=False,
+    )
+    fig.update_yaxes(
+        title_text="Mean Density (pieces/m³, log scale)",
+        tickvals=[-3, -2, -1, 0, 1, 2, 3, 4],
+        ticktext=["0.001", "0.01", "0.1", "1", "10", "100", "1K", "10K"],
         showgrid=True,
         gridcolor="#f0f0f0",
+        gridwidth=1,
     )
 
     return fig
@@ -682,34 +789,26 @@ def build_correlation_charts(
     correlations: list[dict],
     feature_cols: list[str],
 ) -> list[go.Figure]:
-    """Build one scatter-with-trendline figure per feature–density pair.
+    """Build one density-aware scatter figure per feature–density pair.
 
-    Each figure includes raw scatter points (small, semi-transparent), a
-    numpy-polyfit OLS trendline, and a top-left annotation with the Spearman
-    ρ, p-value, and sample size.  Annotation color reflects effect size:
-    green (|ρ| > 0.3), orange (0.1–0.3), grey (< 0.1).
-
-    Columns in ``feature_cols`` that are absent from ``df`` are skipped with
-    a warning.  ``CHART_THEME`` is applied to every figure.
+    Each figure has three layers: a 2-D density contour background, a sparse
+    scatter overlay, and a smooth log-scale–aware trend line.  Spearman stats
+    are shown in a styled annotation box.
 
     Args:
         df: Cleaned microplastics DataFrame containing ``measurement`` and
             (some of) the columns named in ``feature_cols``.
         correlations: Output of :func:`compute_correlations` — list of dicts
             with keys ``feature``, ``rho``, ``p_value``, ``n``.
-        feature_cols: Feature columns to chart (same candidates passed to
-            :func:`compute_correlations`).
+        feature_cols: Feature columns to chart.
 
     Returns:
-        A list of Plotly Figures, one per valid feature, ready for
-        ``st.plotly_chart``.
+        A list of Plotly Figures, one per valid feature.
     """
     validate_dataframe(df, ["measurement"])
 
-    # Build lookup from correlations list for quick access
     corr_lookup: dict[str, dict] = {c["feature"]: c for c in correlations}
 
-    # Friendly axis labels (unit hints where known)
     axis_labels: dict[str, str] = {
         "latitude": "Latitude (°)",
         "longitude": "Longitude (°)",
@@ -729,75 +828,117 @@ def build_correlation_charts(
         x = subset[col].astype(float).values
         y = subset["measurement"].astype(float).values
 
-        # Trendline fitted in log-y space (density is log-distributed)
-        y_pos = y.clip(min=1e-4)
-        x_sorted = np.sort(x)
-        coeffs = np.polyfit(x, np.log10(y_pos), 1)
-        y_trend = 10 ** np.polyval(coeffs, x_sorted)
-
-        # Annotation color by effect size
+        # --- Stats ---
         corr = corr_lookup.get(col, {})
         rho = corr.get("rho", float("nan"))
         p_val = corr.get("p_value", float("nan"))
         n = corr.get("n", len(subset))
-
         abs_rho = abs(rho)
-        if abs_rho > 0.3:
-            annot_color = CORR_STRONG
-        elif abs_rho >= 0.1:
-            annot_color = CORR_MODERATE
-        else:
-            annot_color = NEUTRAL_GREY
 
+        # --- Annotation color + subtitle by effect size ---
+        if abs_rho > 0.3:
+            annot_color = "#2ecc71"
+            subtitle = "Moderate to strong relationship"
+        elif abs_rho >= 0.1:
+            annot_color = "#f39c12"
+            subtitle = "Weak relationship"
+        else:
+            annot_color = "#95a5a6"
+            subtitle = "Negligible relationship"
+
+        p_val_str = "< 0.0001" if p_val < 0.0001 else f"{p_val:.4f}"
         x_label = axis_labels.get(col, col.replace("_", " ").title())
+
+        # --- Smooth log-space trendline (200 points) ---
+        y_pos = y.clip(min=1e-10)
+        log_y = np.log10(y_pos)
+        coeffs = np.polyfit(x, log_y, 1)
+        x_line = np.linspace(x.min(), x.max(), 200)
+        y_line = 10 ** np.polyval(coeffs, x_line)
+
+        # --- Sparse scatter sample (max 2 000 points) ---
+        rng = np.random.default_rng(42)
+        if len(subset) > 2000:
+            idx = rng.choice(len(subset), 2000, replace=False)
+            x_sample = x[idx]
+            y_sample = y[idx]
+        else:
+            x_sample, y_sample = x, y
 
         fig = go.Figure()
 
-        # Scatter points — low opacity so trendline reads clearly
-        fig.add_trace(go.Scatter(
+        # Layer 1 — 2-D density contour background
+        fig.add_trace(go.Histogram2dContour(
             x=x,
-            y=y,
+            y=np.log10(y_pos),
+            colorscale="Blues",
+            contours_coloring="fill",
+            showscale=False,
+            line_width=0,
+            opacity=0.5,
+            hoverinfo="skip",
+            showlegend=False,
+            ncontours=12,
+        ))
+
+        # Layer 2 — sparse scatter overlay
+        fig.add_trace(go.Scatter(
+            x=x_sample,
+            y=y_sample,
             mode="markers",
             name="Observations",
-            marker=dict(size=5, color=PALETTE[0], opacity=0.2, line=dict(width=0)),
+            marker=dict(size=4, color=PALETTE[0], opacity=0.35, line=dict(width=0)),
             hovertemplate=(
                 f"{x_label}: %{{x}}<br>"
                 "Density: %{y:.4f} pieces/m³<extra></extra>"
             ),
+            showlegend=False,
         ))
 
-        # Trendline — solid, thick, high-contrast so it reads over the scatter
+        # Layer 3 — smooth trend line
         fig.add_trace(go.Scatter(
-            x=x_sorted,
-            y=y_trend,
+            x=x_line,
+            y=y_line,
             mode="lines",
-            name="Regression line",
-            line=dict(color="#E63946", width=3.5, dash="solid"),
+            name="Trend",
+            line=dict(color=ACCENT_COLOR, width=2, dash="dash"),
             hoverinfo="skip",
+            showlegend=True,
         ))
 
-        apply_standard_layout(fig, f"Density vs. {x_label}")
-        fig.update_layout(height=380, margin=dict(l=70, r=30, t=60, b=60))
-        fig.update_xaxes(title_text=x_label, tickfont=dict(size=12))
+        apply_standard_layout(
+            fig,
+            f"Density vs. {x_label}<br><sup>{subtitle}</sup>",
+        )
+        fig.update_layout(
+            height=420,
+            margin=dict(l=70, r=30, t=80, b=60),
+            showlegend=True,
+        )
+        fig.update_xaxes(
+            title_text=x_label,
+            showgrid=True,
+            gridcolor="#f0f0f0",
+        )
         fig.update_yaxes(
-            title_text="Density (pieces/m³)",
+            title_text="Density (log scale)",
             type="log",
-            tickformat=".2g",
-            tickfont=dict(size=12),
+            tickformat=".0e",
+            showgrid=True,
             gridcolor="#f0f0f0",
         )
 
         fig.add_annotation(
-            text=f"Spearman ρ = {rho:.3f}  |  p = {p_val:.4f}  |  n = {n:,}",
+            text=f"<b>Spearman ρ = {rho:+.3f}</b>   p = {p_val_str}   n = {n:,}",
             xref="paper", yref="paper",
             x=0.02, y=0.97,
             xanchor="left", yanchor="top",
             showarrow=False,
             font=dict(size=12, color=annot_color, family="Inter, Arial, sans-serif"),
-            bgcolor="rgba(255,255,255,0.9)",
+            bgcolor="rgba(255,255,255,0.85)",
             bordercolor=annot_color,
-            borderwidth=1,
-            borderpad=5,
+            borderwidth=1.5,
+            borderpad=6,
         )
 
         figs.append(fig)

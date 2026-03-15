@@ -193,34 +193,74 @@ def render() -> None:
 
     # ---- Tab 1: Ocean Basins ----------------------------------------- #
     with tab1:
-        st.info(
-            "Each bar shows the mean microplastic density for all samples collected "
-            "in that ocean basin. Error bars represent ±1 standard deviation. "
-            "Basins with fewer than 10 samples are excluded to avoid misleading averages."
-        )
-        st.divider()
-
         with st.spinner("Crunching basin stats..."):
             basin_stats = _cached_basin_stats(_df_hash(filtered_df), filtered_df)
             basin_stats = basin_stats[basin_stats["count"] >= 10]
-            fig = build_basin_chart(basin_stats)
 
-        st.plotly_chart(fig, use_container_width=True)
+        if basin_stats.empty:
+            st.warning("No basins with ≥10 observations match the current filters.")
+        else:
+            # ── FIX 5: Dynamic key-finding callout ──────────────────────
+            worst_basin = basin_stats["mean"].idxmax()
+            best_basin  = basin_stats["mean"].idxmin()
+            worst_mean  = float(basin_stats.loc[worst_basin, "mean"])
+            best_mean   = float(basin_stats.loc[best_basin,  "mean"])
+            ratio       = worst_mean / best_mean if best_mean > 0 else float("nan")
 
-        with st.expander("View raw basin statistics table"):
-            display = basin_stats.copy().reset_index()
-            display.insert(0, "Rank", range(1, len(display) + 1))
-            st.dataframe(
-                display.style.format({
-                    "mean": "{:.2f}",
-                    "median": "{:.2f}",
-                    "std": "{:.2f}",
-                    "count": "{:.0f}",
-                    "p25": "{:.2f}",
-                    "p75": "{:.2f}",
-                }),
-                use_container_width=True,
+            st.info(
+                f"**Key finding:** The **{worst_basin}** has the highest mean microplastic "
+                f"density at {worst_mean:.1f} pieces/m³ — approximately **{ratio:.0f}×** higher "
+                f"than the {best_basin} ({best_mean:.3f} pieces/m³). All values are shown on "
+                f"a log scale because density spans several orders of magnitude across basins. "
+                f"Error bars have been replaced with interquartile range bands to avoid "
+                f"distortion from extreme outliers."
             )
+            st.divider()
+
+            # ── FIX 4: Chart + basin snapshot panel side by side ────────
+            fig = build_basin_chart(basin_stats)
+            col_chart, col_snapshot = st.columns([3, 2])
+
+            with col_chart:
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col_snapshot:
+                st.subheader("Basin Snapshot")
+                global_mean = float(basin_stats["mean"].mean())
+                sorted_basins = basin_stats.sort_values("mean", ascending=False)
+
+                for basin in sorted_basins.index:
+                    row = sorted_basins.loc[basin]
+                    basin_mean = float(row["mean"])
+                    pct_delta  = (basin_mean / global_mean - 1) * 100
+                    st.metric(
+                        label=basin,
+                        value=f"{basin_mean:.2f} pieces/m³",
+                        delta=f"{pct_delta:+.0f}% vs global avg",
+                        delta_color="inverse" if basin_mean < global_mean else "normal",
+                    )
+
+                st.caption(
+                    "Values shown are mean density (back-transformed from log scale). "
+                    "Positive delta = above global average."
+                )
+
+            # ── Raw stats expander ───────────────────────────────────────
+            with st.expander("View raw basin statistics table"):
+                display = basin_stats[["mean", "median", "p25", "p75", "count"]].copy().reset_index()
+                display.insert(0, "Rank", range(1, len(display) + 1))
+                display.columns = ["Rank", "Ocean Basin", "Mean", "Median", "Q25", "Q75", "Count"]
+                st.dataframe(
+                    display.style.format({
+                        "Mean":   "{:.4f}",
+                        "Median": "{:.4f}",
+                        "Q25":    "{:.4f}",
+                        "Q75":    "{:.4f}",
+                        "Count":  "{:.0f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
     # ---- Tab 2: Temporal Trends -------------------------------------- #
     with tab2:
@@ -305,22 +345,25 @@ def render() -> None:
 
             with col_table:
                 st.subheader("Cluster Summary")
-                display_cols = ["label", "center_lat", "center_lon", "observation_count", "mean_density"]
+                loc_col = ["location"] if "location" in cluster_summary.columns else []
+                display_cols = ["label"] + loc_col + ["center_lat", "center_lon", "observation_count", "mean_density"]
                 summary_display = cluster_summary[display_cols].copy()
                 summary_display.insert(0, "#", range(1, len(summary_display) + 1))
-                summary_display = summary_display.rename(columns={
+                rename_map = {
                     "label": "Cluster ID",
+                    "location": "Nearest Landmark",
                     "center_lat": "Center Lat (°)",
                     "center_lon": "Center Lon (°)",
                     "observation_count": "Observations",
                     "mean_density": "Mean Density (pieces/m³)",
-                })
+                }
+                summary_display = summary_display.rename(columns=rename_map)
 
-                max_density_idx = summary_display["Mean Density (pieces/m³)"].idxmax()
+                top_obs_idx = summary_display["Observations"].idxmax()
 
                 def _highlight_max(row):
                     return [
-                        "background-color: #fff3cd" if row.name == max_density_idx else ""
+                        "background-color: #d0e8ff" if row.name == top_obs_idx else ""
                         for _ in row
                     ]
 
@@ -367,27 +410,67 @@ def render() -> None:
             )
             figs = build_correlation_charts(filtered_df, correlations, feature_cols)
 
-        # Compact summary table
+        # Compact summary table — color-coded by effect size
         if correlations:
             summary_records = [
                 {
                     "Feature": c["feature"],
-                    "ρ (Spearman)": round(c["rho"], 4),
-                    "p-value": round(c["p_value"], 4),
+                    "ρ (Spearman)": c["rho"],
+                    "p-value": c["p_value"],
                     "n": c["n"],
                     "Significant?": "✅ Yes" if c["p_value"] < 0.05 else "❌ No",
                 }
                 for c in correlations
             ]
-            corr_table = pd.DataFrame(summary_records)
-            st.dataframe(corr_table, use_container_width=True, hide_index=True)
+            corr_summary_df = pd.DataFrame(summary_records)
+
+            def _style_correlation_table(df_in: pd.DataFrame):
+                def _color_rho(val: float) -> str:
+                    av = abs(val)
+                    if av > 0.3:
+                        return "color: #27ae60; font-weight: bold"
+                    elif av > 0.1:
+                        return "color: #e67e22; font-weight: bold"
+                    return "color: #7f8c8d"
+
+                return (
+                    df_in.style
+                    .applymap(_color_rho, subset=["ρ (Spearman)"])
+                    .format({
+                        "ρ (Spearman)": "{:+.4f}",
+                        "p-value": lambda v: "< 0.0001" if v < 0.0001 else f"{v:.4f}",
+                        "n": "{:,}",
+                    })
+                    .set_properties(**{"text-align": "left"})
+                    .hide(axis="index")
+                )
+
+            st.dataframe(
+                _style_correlation_table(corr_summary_df),
+                use_container_width=True,
+            )
         else:
             st.warning("No valid feature columns found for correlation analysis.")
 
-        # Charts — two per row
-        for i in range(0, len(figs), 2):
-            row_figs = figs[i : i + 2]
-            cols = st.columns(len(row_figs))
-            for col, fig in zip(cols, row_figs):
-                with col:
-                    st.plotly_chart(fig, use_container_width=True)
+        # Charts — smart layout based on count
+        n_figs = len(figs)
+        if n_figs == 0:
+            pass
+        elif n_figs == 1:
+            st.plotly_chart(figs[0], use_container_width=True)
+        elif n_figs == 2:
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(figs[0], use_container_width=True)
+            c2.plotly_chart(figs[1], use_container_width=True)
+        elif n_figs == 3:
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(figs[0], use_container_width=True)
+            c2.plotly_chart(figs[1], use_container_width=True)
+            _, c_center, _ = st.columns([1, 2, 1])
+            c_center.plotly_chart(figs[2], use_container_width=True)
+        else:
+            for i in range(0, n_figs, 2):
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    if i + j < n_figs:
+                        col.plotly_chart(figs[i + j], use_container_width=True)
