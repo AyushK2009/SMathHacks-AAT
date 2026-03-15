@@ -6,4 +6,4 @@ data/*.parquet
 __pycache__/
 .venv/
 *.pkl
-.DS_Store
+.DS_StoreCLAUDE.md
