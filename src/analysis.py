@@ -7,8 +7,12 @@ anything itself — all rendering is delegated to the Streamlit page layer.
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import warnings
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -16,8 +20,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy import stats
+from scipy.spatial import ConvexHull, QhullError
+from sklearn.cluster import DBSCAN
 
 logger = logging.getLogger(__name__)
+
+EARTH_RADIUS_KM = 6371.0088
+DEFAULT_HOTSPOT_POINTS_BASENAME = "hotspot_points"
+DEFAULT_HOTSPOT_POLYGONS_FILENAME = "hotspot_boundaries.json"
+REQUIRED_CLUSTERING_COLUMNS = ("latitude", "longitude", "density")
+SUPPORTED_POINTS_FORMATS = frozenset({"parquet", "csv"})
 
 # ---------------------------------------------------------------------------
 # Color palette — reused across all charts
@@ -680,12 +692,486 @@ def build_correlation_charts(
 
 
 # ---------------------------------------------------------------------------
-# Quick smoke-test
+# Hotspot clustering helpers
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
-    import sys
+def validate_hotspot_input_dataframe(
+    df: pd.DataFrame,
+    *,
+    required_columns: tuple[str, ...] = REQUIRED_CLUSTERING_COLUMNS,
+) -> pd.DataFrame:
+    """Return a validated observations DataFrame for hotspot clustering."""
+
+    if df is None:
+        raise ValueError("Observations DataFrame is required for hotspot clustering.")
+
+    _validate_required_columns(
+        df,
+        required_columns,
+        error_prefix="Observations DataFrame is missing required columns for clustering",
+    )
+
+    validated_df = df.copy()
+    for column in required_columns:
+        validated_df[column] = pd.to_numeric(validated_df[column], errors="coerce")
+
+    validated_df = validated_df.dropna(subset=list(required_columns)).reset_index(drop=True)
+    if validated_df.empty:
+        required_list = ", ".join(required_columns)
+        raise ValueError(
+            "Observations DataFrame does not contain any valid rows with numeric "
+            f"{required_list} values."
+        )
+
+    return validated_df
+
+
+def validate_hotspot_polygons_payload(payload: object) -> list[dict[str, Any]]:
+    """Validate and return hotspot polygon records from a JSON payload."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Hotspot boundaries JSON must contain an object payload.")
+
+    polygons = payload.get("polygons", [])
+    if not isinstance(polygons, list):
+        raise ValueError("Hotspot boundaries file must contain a 'polygons' list.")
+
+    for polygon in polygons:
+        if not isinstance(polygon, dict):
+            raise ValueError("Each hotspot polygon payload must be a JSON object.")
+        if "polygon" not in polygon:
+            raise ValueError("Each hotspot polygon payload must include a 'polygon' field.")
+        if not isinstance(polygon["polygon"], list):
+            raise ValueError("Each hotspot polygon field must be a list of coordinates.")
+
+    return polygons
+
+
+def filter_high_density_observations(
+    df: pd.DataFrame,
+    density_percentile: float = 75.0,
+) -> pd.DataFrame:
+    """Return hotspot candidate observations above a density percentile threshold."""
+
+    _validate_cluster_parameters(density_percentile=density_percentile)
+
+    validated_df = validate_hotspot_input_dataframe(df, required_columns=("density",))
+    density_threshold = validated_df["density"].quantile(density_percentile / 100.0)
+    if pd.isna(density_threshold):
+        raise ValueError(
+            "Unable to compute a density percentile threshold from the observations DataFrame."
+        )
+
+    high_density_df = validated_df.loc[validated_df["density"] >= density_threshold].copy()
+    high_density_df["density_percentile_threshold"] = density_threshold
+    return high_density_df.reset_index(drop=True)
+
+
+def cluster_hotspot_observations(
+    df: pd.DataFrame,
+    density_percentile: float = 75.0,
+    eps_km: float = 250.0,
+    min_samples: int = 3,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Cluster high-density observations and return hotspot points and polygons."""
+
+    _validate_cluster_parameters(
+        density_percentile=density_percentile,
+        eps_km=eps_km,
+        min_samples=min_samples,
+    )
+
+    validated_df = validate_hotspot_input_dataframe(df)
+    high_density_df = filter_high_density_observations(
+        validated_df,
+        density_percentile=density_percentile,
+    )
+    if high_density_df.empty:
+        return high_density_df.assign(cluster_label=pd.Series(dtype="int64")), []
+
+    cluster_labels = _fit_hotspot_dbscan(
+        high_density_df,
+        eps_km=eps_km,
+        min_samples=min_samples,
+    )
+
+    labeled_hotspots = high_density_df.copy()
+    labeled_hotspots["cluster_label"] = cluster_labels.astype(int)
+    clustered_hotspots = labeled_hotspots.loc[
+        labeled_hotspots["cluster_label"] != -1
+    ].copy()
+
+    boundary_polygons = build_cluster_boundary_polygons(clustered_hotspots)
+    return clustered_hotspots.reset_index(drop=True), boundary_polygons
+
+
+def build_cluster_boundary_polygons(
+    hotspot_points: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    """Build serializable boundary polygons for each hotspot cluster."""
+
+    if hotspot_points.empty:
+        return []
+
+    _validate_required_columns(
+        hotspot_points,
+        ("cluster_label", "latitude", "longitude"),
+        error_prefix="Hotspot points are missing required columns for polygon creation",
+    )
+
+    polygons: list[dict[str, Any]] = []
+    grouped_points = hotspot_points.groupby("cluster_label", sort=True)
+
+    for cluster_label, cluster_df in grouped_points:
+        if cluster_label == -1:
+            continue
+
+        cluster_points = _extract_cluster_coordinates(cluster_df)
+        if cluster_points.size == 0:
+            continue
+
+        ring = _build_cluster_ring(cluster_points)
+        polygons.append(_build_polygon_record(cluster_label, cluster_df, ring))
+
+    return polygons
+
+
+def precompute_and_save_hotspot_clusters(
+    df: pd.DataFrame,
+    output_dir: str | Path,
+    *,
+    density_percentile: float = 75.0,
+    eps_km: float = 250.0,
+    min_samples: int = 3,
+    points_format: str = "parquet",
+) -> dict[str, Path]:
+    """Compute hotspot clusters and save reusable point and polygon artifacts."""
+
+    hotspot_points, boundary_polygons = cluster_hotspot_observations(
+        df,
+        density_percentile=density_percentile,
+        eps_km=eps_km,
+        min_samples=min_samples,
+    )
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    points_path = _build_hotspot_points_path(output_dir, points_format)
+    polygons_path = output_dir / DEFAULT_HOTSPOT_POLYGONS_FILENAME
+
+    _save_hotspot_points(hotspot_points, points_path, points_format)
+    _save_hotspot_polygons(
+        boundary_polygons,
+        polygons_path,
+        density_percentile=density_percentile,
+        eps_km=eps_km,
+        min_samples=min_samples,
+    )
+
+    return {
+        "points_path": points_path,
+        "polygons_path": polygons_path,
+    }
+
+
+def load_precomputed_hotspot_clusters(
+    output_dir: str | Path,
+    *,
+    points_format: str = "parquet",
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Load precomputed hotspot points and boundary polygons from disk."""
+
+    output_dir = Path(output_dir)
+    points_path = _build_hotspot_points_path(output_dir, points_format)
+    polygons_path = output_dir / DEFAULT_HOTSPOT_POLYGONS_FILENAME
+
+    _require_existing_file(points_path, "Hotspot points file")
+    _require_existing_file(polygons_path, "Hotspot polygon file")
+
+    hotspot_points = _load_hotspot_points(points_path, points_format)
+    polygons_payload = _load_json_payload(polygons_path)
+    return hotspot_points, validate_hotspot_polygons_payload(polygons_payload)
+
+
+def run_hotspot_precompute(
+    input_path: str | Path,
+    output_dir: str | Path,
+    *,
+    density_percentile: float = 75.0,
+    eps_km: float = 250.0,
+    min_samples: int = 3,
+    points_format: str = "parquet",
+) -> dict[str, Path]:
+    """Load cleaned observations data and save hotspot artifacts."""
+
+    observations_df = _read_observations_frame(input_path)
+    return precompute_and_save_hotspot_clusters(
+        observations_df,
+        output_dir,
+        density_percentile=density_percentile,
+        eps_km=eps_km,
+        min_samples=min_samples,
+        points_format=points_format,
+    )
+
+
+def _validate_required_columns(
+    df: pd.DataFrame,
+    required_columns: tuple[str, ...] | list[str],
+    *,
+    error_prefix: str,
+) -> None:
+    """Raise a ``ValueError`` when a DataFrame is missing required columns."""
+
+    missing_columns = sorted(set(required_columns) - set(df.columns))
+    if missing_columns:
+        raise ValueError(f"{error_prefix}: {', '.join(missing_columns)}.")
+
+
+def _validate_cluster_parameters(
+    *,
+    density_percentile: float,
+    eps_km: float | None = None,
+    min_samples: int | None = None,
+) -> None:
+    """Validate user-facing hotspot clustering parameters."""
+
+    if not 0 <= density_percentile <= 100:
+        raise ValueError("density_percentile must be between 0 and 100.")
+    if eps_km is not None and eps_km <= 0:
+        raise ValueError("eps_km must be greater than zero.")
+    if min_samples is not None and min_samples < 1:
+        raise ValueError("min_samples must be at least 1.")
+
+
+def _fit_hotspot_dbscan(
+    hotspot_df: pd.DataFrame,
+    *,
+    eps_km: float,
+    min_samples: int,
+) -> np.ndarray:
+    """Fit haversine DBSCAN to hotspot candidate coordinates."""
+
+    coordinates_radians = np.radians(
+        hotspot_df.loc[:, ["latitude", "longitude"]].to_numpy(dtype=float)
+    )
+    eps_radians = eps_km / EARTH_RADIUS_KM
+
+    dbscan = DBSCAN(
+        eps=eps_radians,
+        min_samples=min_samples,
+        metric="haversine",
+        algorithm="ball_tree",
+    )
+    return dbscan.fit_predict(coordinates_radians)
+
+
+def _extract_cluster_coordinates(cluster_df: pd.DataFrame) -> np.ndarray:
+    """Return cluster coordinates as ``[longitude, latitude]`` pairs."""
+
+    return cluster_df.loc[:, ["longitude", "latitude"]].to_numpy(dtype=float)
+
+
+def _build_polygon_record(
+    cluster_label: int | np.integer[Any],
+    cluster_df: pd.DataFrame,
+    ring: np.ndarray,
+) -> dict[str, Any]:
+    """Return one serializable polygon payload for a hotspot cluster."""
+
+    return {
+        "cluster_label": int(cluster_label),
+        "point_count": int(len(cluster_df)),
+        "centroid": {
+            "latitude": float(cluster_df["latitude"].mean()),
+            "longitude": float(cluster_df["longitude"].mean()),
+        },
+        "polygon": [
+            {"longitude": float(longitude), "latitude": float(latitude)}
+            for longitude, latitude in ring
+        ],
+    }
+
+
+def _build_cluster_ring(cluster_points: np.ndarray) -> np.ndarray:
+    """Return a closed polygon ring for a cluster of ``[lon, lat]`` points."""
+
+    if len(cluster_points) == 0:
+        raise ValueError("Cluster polygon generation requires at least one coordinate pair.")
+    if len(cluster_points) < 3:
+        return _bounding_box_ring(cluster_points)
+
+    try:
+        hull = ConvexHull(cluster_points)
+        hull_points = cluster_points[hull.vertices]
+    except QhullError:
+        return _bounding_box_ring(cluster_points)
+
+    return _close_ring(hull_points)
+
+
+def _bounding_box_ring(cluster_points: np.ndarray) -> np.ndarray:
+    """Return a rectangular fallback ring that encloses a cluster."""
+
+    min_longitude, min_latitude = cluster_points.min(axis=0)
+    max_longitude, max_latitude = cluster_points.max(axis=0)
+
+    longitude_padding = max((max_longitude - min_longitude) * 0.05, 1e-6)
+    latitude_padding = max((max_latitude - min_latitude) * 0.05, 1e-6)
+
+    ring = np.array(
+        [
+            [min_longitude - longitude_padding, min_latitude - latitude_padding],
+            [max_longitude + longitude_padding, min_latitude - latitude_padding],
+            [max_longitude + longitude_padding, max_latitude + latitude_padding],
+            [min_longitude - longitude_padding, max_latitude + latitude_padding],
+        ]
+    )
+    return _close_ring(ring)
+
+
+def _close_ring(points: np.ndarray) -> np.ndarray:
+    """Return polygon coordinates with the first point repeated at the end."""
+
+    if np.array_equal(points[0], points[-1]):
+        return points
+    return np.vstack([points, points[0]])
+
+
+def _build_hotspot_points_path(output_dir: Path, points_format: str) -> Path:
+    """Return the hotspot points artifact path for the requested format."""
+
+    normalized_format = _normalize_points_format(points_format)
+    return output_dir / f"{DEFAULT_HOTSPOT_POINTS_BASENAME}.{normalized_format}"
+
+
+def _normalize_points_format(points_format: str) -> str:
+    """Return a normalized hotspot points file format."""
+
+    normalized_format = points_format.lower()
+    if normalized_format not in SUPPORTED_POINTS_FORMATS:
+        raise ValueError("points_format must be either 'parquet' or 'csv'.")
+    return normalized_format
+
+
+def _save_hotspot_points(
+    hotspot_points: pd.DataFrame,
+    points_path: Path,
+    points_format: str,
+) -> None:
+    """Write hotspot point artifacts to disk."""
+
+    normalized_format = _normalize_points_format(points_format)
+    if normalized_format == "parquet":
+        hotspot_points.to_parquet(points_path, index=False)
+        return
+    hotspot_points.to_csv(points_path, index=False)
+
+
+def _load_hotspot_points(points_path: Path, points_format: str) -> pd.DataFrame:
+    """Read hotspot point artifacts from disk."""
+
+    normalized_format = _normalize_points_format(points_format)
+    if normalized_format == "parquet":
+        return pd.read_parquet(points_path)
+    return pd.read_csv(points_path)
+
+
+def _save_hotspot_polygons(
+    boundary_polygons: list[dict[str, Any]],
+    polygons_path: Path,
+    *,
+    density_percentile: float,
+    eps_km: float,
+    min_samples: int,
+) -> None:
+    """Write hotspot polygon metadata to disk as JSON."""
+
+    payload = {
+        "version": 1,
+        "density_percentile": density_percentile,
+        "eps_km": eps_km,
+        "min_samples": min_samples,
+        "cluster_count": len(boundary_polygons),
+        "polygons": boundary_polygons,
+    }
+    with polygons_path.open("w", encoding="utf-8") as polygons_file:
+        json.dump(payload, polygons_file, indent=2)
+
+
+def _require_existing_file(path: Path, description: str) -> None:
+    """Raise ``FileNotFoundError`` when an expected artifact file is missing."""
+
+    if not path.exists():
+        raise FileNotFoundError(f"{description} not found: {path}")
+
+
+def _load_json_payload(path: Path) -> dict[str, Any]:
+    """Read and return a JSON payload from disk."""
+
+    with path.open("r", encoding="utf-8") as json_file:
+        payload = json.load(json_file)
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object in {path}.")
+    return payload
+
+
+def _read_observations_frame(input_path: str | Path) -> pd.DataFrame:
+    """Read a cleaned observations DataFrame from CSV or parquet."""
+
+    input_path = Path(input_path)
+    suffix = input_path.suffix.lower()
+
+    if suffix == ".parquet":
+        return pd.read_parquet(input_path)
+    if suffix == ".csv":
+        return pd.read_csv(input_path)
+
+    raise ValueError("input_path must point to a .csv or .parquet file.")
+
+
+def _build_hotspot_argument_parser() -> argparse.ArgumentParser:
+    """Create the CLI parser for offline hotspot precomputation."""
+
+    parser = argparse.ArgumentParser(
+        description="Precompute hotspot clustering artifacts for the Streamlit app."
+    )
+    parser.add_argument("input_path", help="Path to a cleaned observations CSV or parquet file.")
+    parser.add_argument("output_dir", help="Directory where hotspot artifacts should be saved.")
+    parser.add_argument(
+        "--density-percentile",
+        type=float,
+        default=75.0,
+        help="Density percentile cutoff for hotspot candidate selection.",
+    )
+    parser.add_argument(
+        "--eps-km",
+        type=float,
+        default=250.0,
+        help="DBSCAN neighborhood radius in kilometers.",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=3,
+        help="Minimum number of hotspot points required for a cluster.",
+    )
+    parser.add_argument(
+        "--points-format",
+        choices=tuple(sorted(SUPPORTED_POINTS_FORMATS)),
+        default="parquet",
+        help="Output format for the hotspot points artifact.",
+    )
+    return parser
+
+
+def _run_quick_smoke_test() -> None:
+    """Run the historical zero-argument smoke test for the analysis module."""
+
     import os
+    import sys
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
     from src.data_loader import load_microplastics
@@ -698,3 +1184,23 @@ if __name__ == "__main__":
     fig = build_basin_chart(basin_stats)
     print(f"\nChart title: {fig.layout.title.text}")
     print(f"Traces: {len(fig.data)}")
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1:
+        parser = _build_hotspot_argument_parser()
+        arguments = parser.parse_args()
+        saved_paths = run_hotspot_precompute(
+            arguments.input_path,
+            arguments.output_dir,
+            density_percentile=arguments.density_percentile,
+            eps_km=arguments.eps_km,
+            min_samples=arguments.min_samples,
+            points_format=arguments.points_format,
+        )
+        print(f"Saved hotspot points to {saved_paths['points_path']}")
+        print(f"Saved hotspot polygons to {saved_paths['polygons_path']}")
+    else:
+        _run_quick_smoke_test()
